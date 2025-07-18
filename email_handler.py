@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from threading import Event
 import traceback
 from speech_to_text import transcribe_audio
+from db_operations import save_voicemail, update_transcription, get_voicemail_by_email_uid, log_processing_success, log_processing_error
 
 load_dotenv()
 
@@ -24,6 +25,13 @@ def process_email(uid, mail):
     """Process a single email and extract voicemail data"""
     print(f"Processing email with UID: {uid}")
     try:
+        # Check if we've already processed this email
+        email_uid_str = uid.decode()
+        existing_voicemail = get_voicemail_by_email_uid(email_uid_str)
+        if existing_voicemail:
+            print(f"⏭️ Email {email_uid_str} already processed, skipping...")
+            return
+        
         # Fetch the email
         status, msg_data = mail.fetch(uid, '(RFC822)')
         if status != 'OK':
@@ -70,6 +78,17 @@ def process_email(uid, mail):
                     except Exception as e:
                         print(f"Error saving attachment: {e}")
 
+        # Save voicemail to database first (even without transcription)
+        voicemail_id = None
+        if saved_file:
+            voicemail_id = save_voicemail(
+                sender_email=sender_email,
+                subject=subject,
+                phone_number=phone_number,
+                email_uid=email_uid_str,
+                file_path=saved_file
+            )
+
         print(f"✅ Processed voicemail from {sender_email}")
         if phone_number:
             print(f"   Phone: {phone_number}")
@@ -79,15 +98,25 @@ def process_email(uid, mail):
             # Transcribe the audio file
             try:
                 print("🎤 Transcribing audio...")
+                start_time = time.time()
                 transcribed_text = transcribe_audio(saved_file)
+                transcription_time = time.time() - start_time
+                
                 print("✅ Transcription complete:")
                 print(f"📝 Text: {transcribed_text}")
+                
+                # Update database with transcription
+                if voicemail_id:
+                    update_transcription(voicemail_id, transcribed_text)
+                    log_processing_success(voicemail_id, "transcription", "Audio transcribed successfully", transcription_time)
                 
                 # TODO: Add phishing analysis here
                 # TODO: Send response email with results
                 
             except Exception as e:
                 print(f"❌ Transcription failed: {e}")
+                if voicemail_id:
+                    log_processing_error(voicemail_id, "transcription", str(e))
                 traceback.print_exc()
         
         # Mark email as read
@@ -96,6 +125,7 @@ def process_email(uid, mail):
         
     except Exception as e:
         print(f"❌ Error processing email {uid}: {e}")
+        log_processing_error(None, "email_processing", str(e))
         traceback.print_exc()
 
 def polling_loop():

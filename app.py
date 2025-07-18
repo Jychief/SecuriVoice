@@ -1,5 +1,6 @@
 from flask import Flask, render_template
 from email_handler import start_email_monitoring
+from db_operations import init_database
 import threading
 
 app = Flask(__name__)
@@ -17,6 +18,14 @@ def community():
 if __name__ == "__main__":
     print("🚀 Starting SecuriVoice")
     print("📝 Make sure your .env file is configured")
+    
+    # Initialize database
+    print("💾 Initializing database...")
+    if init_database():
+        print("✅ Database ready")
+    else:
+        print("❌ Database initialization failed - continuing anyway")
+    
     print("📧 Starting email monitoring...")
     
     # Start email monitoring in background thread
