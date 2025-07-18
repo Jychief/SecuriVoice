@@ -5,6 +5,7 @@ import time
 from dotenv import load_dotenv
 from threading import Event
 import traceback
+from speech_to_text import transcribe_audio
 
 load_dotenv()
 
@@ -74,6 +75,20 @@ def process_email(uid, mail):
             print(f"   Phone: {phone_number}")
         if saved_file:
             print(f"   File: {saved_file}")
+            
+            # Transcribe the audio file
+            try:
+                print("🎤 Transcribing audio...")
+                transcribed_text = transcribe_audio(saved_file)
+                print("✅ Transcription complete:")
+                print(f"📝 Text: {transcribed_text}")
+                
+                # TODO: Add phishing analysis here
+                # TODO: Send response email with results
+                
+            except Exception as e:
+                print(f"❌ Transcription failed: {e}")
+                traceback.print_exc()
         
         # Mark email as read
         mail.store(uid, '+FLAGS', '\\Seen')
@@ -93,12 +108,10 @@ def polling_loop():
     while not stop_event.is_set():
         mail = None
         try:
-            # Connect to email server
-            print("📧 Connecting to email server...")
+            # Connect to email server (silently during normal operation)
             mail = imaplib.IMAP4_SSL(EMAIL_HOST)
             mail.login(EMAIL_USER, EMAIL_PASS)
             mail.select('inbox')
-            print("✅ Connected successfully")
             
             # Get current email count
             status, data = mail.search(None, 'ALL')
@@ -150,6 +163,18 @@ def polling_loop():
             stop_event.wait(15)
     
     print("🛑 Email polling stopped")
+
+def start_email_monitoring():
+    """Start the email monitoring system - called by Flask app"""
+    print("🔧 Initializing email monitoring...")
+    
+    # Test connection first
+    if test_connection():
+        print("✅ Email connection test passed")
+        print("🔄 Starting continuous polling...")
+        polling_loop()
+    else:
+        print("❌ Email connection test failed - monitoring not started")
 
 def test_connection():
     """Test email connection without polling"""
