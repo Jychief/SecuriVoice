@@ -45,7 +45,7 @@ def save_voicemail(sender_email: str, subject: str, phone_number: str,
         db.commit()
         db.refresh(voicemail)
         
-        print(f"💾 Saved voicemail to database (ID: {voicemail.id})")
+        # Removed individual print message - handled in email_handler
         return voicemail.id
         
     except Exception as e:
@@ -73,7 +73,7 @@ def update_transcription(voicemail_id: int, transcribed_text: str,
         voicemail.processed_at = datetime.utcnow()
         
         db.commit()
-        print(f"💾 Updated transcription for voicemail {voicemail_id}")
+        # Removed individual print message - handled in email_handler
         return True
         
     except Exception as e:

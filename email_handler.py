@@ -7,6 +7,7 @@ from threading import Event
 import traceback
 from speech_to_text import transcribe_audio
 from db_operations import save_voicemail, update_transcription, get_voicemail_by_email_uid, log_processing_success, log_processing_error
+from email_response import send_analysis_report
 
 load_dotenv()
 
@@ -94,6 +95,8 @@ def process_email(uid, mail):
             print(f"   Phone: {phone_number}")
         if saved_file:
             print(f"   File: {saved_file}")
+            if voicemail_id:
+                print(f"   💾 Database ID: {voicemail_id}")
             
             # Transcribe the audio file
             try:
@@ -109,9 +112,36 @@ def process_email(uid, mail):
                 if voicemail_id:
                     update_transcription(voicemail_id, transcribed_text)
                     log_processing_success(voicemail_id, "transcription", "Audio transcribed successfully", transcription_time)
+                    print(f"   💾 Saved to database with transcription")
+                
+                # Send analysis report to user
+                try:
+                    print("📧 Generating and sending analysis report...")
+                    
+                    # Prepare voicemail data for report
+                    voicemail_data = {
+                        'phone_number': phone_number,
+                        'transcribed_text': transcribed_text,
+                        'file_name': os.path.basename(saved_file),
+                        'processed_at': time.strftime("%B %d, %Y at %I:%M %p")
+                    }
+                    
+                    # Send report via email
+                    if send_analysis_report(sender_email, voicemail_data):
+                        if voicemail_id:
+                            log_processing_success(voicemail_id, "email_response", "Analysis report sent successfully")
+                        print("   ✅ Analysis report sent")
+                    else:
+                        if voicemail_id:
+                            log_processing_error(voicemail_id, "email_response", "Failed to send analysis report")
+                        print("   ❌ Failed to send analysis report")
+                        
+                except Exception as e:
+                    print(f"❌ Error sending analysis report: {e}")
+                    if voicemail_id:
+                        log_processing_error(voicemail_id, "email_response", str(e))
                 
                 # TODO: Add phishing analysis here
-                # TODO: Send response email with results
                 
             except Exception as e:
                 print(f"❌ Transcription failed: {e}")
