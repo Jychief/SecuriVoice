@@ -16,6 +16,23 @@ SMTP_PASS = os.getenv('SMTP_PASS')  # Your app password
 FROM_EMAIL = os.getenv('FROM_EMAIL', SMTP_USER)
 FROM_NAME = os.getenv('FROM_NAME', 'SecuriVoice Analysis System')
 
+def get_risk_level(risk_score: int) -> tuple:
+    """
+    Convert risk score to level and color
+    
+    Args:
+        risk_score: Risk score from 1-10
+        
+    Returns:
+        Tuple of (risk_level, risk_class)
+    """
+    if risk_score >= 8:
+        return "HIGH", "high"
+    elif risk_score >= 5:
+        return "MEDIUM", "medium"
+    else:
+        return "LOW", "low"
+
 def generate_analysis_report(voicemail_data: dict) -> str:
     """
     Generate HTML analysis report template
@@ -33,14 +50,14 @@ def generate_analysis_report(voicemail_data: dict) -> str:
     file_name = voicemail_data.get('file_name', 'Unknown file')
     processed_at = voicemail_data.get('processed_at', datetime.now())
     
-    # TODO: Replace these with actual analysis results
-    risk_score = 0.75  # Placeholder - will come from analysis module
-    risk_level = "MEDIUM"  # Placeholder
-    suspicious_indicators = [
-        "Urgency language detected",
-        "Request for personal information", 
-        "Unfamiliar caller ID"
-    ]  # Placeholder
+    # Get actual analysis results
+    risk_score = voicemail_data.get('risk_score', 5)
+    indicators = voicemail_data.get('indicators', [])
+    explanation = voicemail_data.get('explanation', 'No explanation available')
+    
+    # Convert risk score to level
+    risk_level, risk_class = get_risk_level(risk_score)
+    risk_percentage = risk_score * 10  # Convert 1-10 scale to percentage
     
     # Format the processed date
     if isinstance(processed_at, str):
@@ -66,6 +83,7 @@ def generate_analysis_report(voicemail_data: dict) -> str:
             .transcription {{ background-color: #e9ecef; padding: 15px; border-radius: 8px; font-style: italic; }}
             .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
             .warning {{ background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 4px; margin: 10px 0; }}
+            .explanation {{ background-color: #e7f3ff; padding: 15px; border-radius: 8px; border-left: 4px solid #3498db; }}
         </style>
     </head>
     <body>
@@ -75,8 +93,8 @@ def generate_analysis_report(voicemail_data: dict) -> str:
         </div>
         
         <div class="content">
-            <div class="risk-score risk-{risk_level.lower()}">
-                Risk Score: {risk_score:.0%} ({risk_level} RISK)
+            <div class="risk-score risk-{risk_class}">
+                Risk Score: {risk_score}/10 ({risk_level} RISK)
             </div>
             
             <div class="section">
@@ -93,37 +111,47 @@ def generate_analysis_report(voicemail_data: dict) -> str:
                 </div>
             </div>
             
+            {'<div class="section"><h3>⚠️ Suspicious Indicators Detected</h3>' + "".join(f'<div class="indicator">• {indicator}</div>' for indicator in indicators) + '</div>' if indicators else '<div class="section"><h3>✅ No Major Indicators Detected</h3><p>No significant phishing indicators were found in this voicemail.</p></div>'}
+            
             <div class="section">
-                <h3>⚠️ Suspicious Indicators Detected</h3>
-                {"".join(f'<div class="indicator">• {indicator}</div>' for indicator in suspicious_indicators)}
+                <h3>🤖 AI Analysis</h3>
+                <div class="explanation">
+                    <strong>Analysis:</strong> {explanation}
+                    {f'<br><br><strong>⚠️ Caller ID Mismatch:</strong> The caller ID does not match any phone numbers mentioned in the voicemail (Found: {", ".join(voicemail_data.get("transcript_numbers", []))}). This suggests phone number spoofing.' if voicemail_data.get("caller_id_mismatch", False) else ''}
+                </div>
             </div>
             
             <div class="section">
-                <h3>🎯 Analysis Summary</h3>
-                <p>Based on our analysis, this voicemail shows <strong>{risk_level.lower()} risk</strong> characteristics commonly associated with phishing attempts.</p>
+                <h3>🎯 Recommendations</h3>
                 
-                {'''<div class="warning">
-                    <strong>⚠️ CAUTION:</strong> This voicemail contains multiple red flags typically seen in phishing scams. 
-                    Do not provide personal information or call back using the number provided in the message.
-                </div>''' if risk_score > 0.6 else ''}
-                
-                <h4>Recommendations:</h4>
+                {f'''<div class="warning">
+                    <strong>⚠️ HIGH RISK ALERT:</strong> This voicemail shows strong indicators of a phishing attempt. 
+                    Exercise extreme caution and do not provide any personal information.
+                </div>
+                <h4>Immediate Actions:</h4>
                 <ul>
-                    <li>🚫 Do not call back using the number provided in the voicemail</li>
-                    <li>🏦 Contact your bank/institution directly using official numbers</li>
-                    <li>🔍 Verify any claims through official channels</li>
-                    <li>🗑️ Delete the voicemail if confirmed as phishing</li>
-                </ul>
+                    <li>🚫 <strong>DO NOT</strong> call back using the number provided in the voicemail</li>
+                    <li>🚫 <strong>DO NOT</strong> provide any personal or financial information</li>
+                    <li>🏦 Contact your bank/institution directly using official numbers from their website</li>
+                    <li>🗑️ Delete this voicemail immediately</li>
+                    <li>📢 Consider reporting this number to authorities</li>
+                </ul>''' if risk_score >= 8 else f'''<h4>Recommended Actions:</h4>
+                <ul>
+                    <li>🔍 Verify any claims through official channels before taking action</li>
+                    <li>🏦 Contact institutions directly using official numbers from their website</li>
+                    <li>⚠️ Be cautious about providing personal information</li>
+                    {'<li>🗑️ Consider deleting this voicemail if you determine it is suspicious</li>' if risk_score >= 5 else '<li>✅ This appears to be a legitimate message, but always verify when in doubt</li>'}
+                </ul>'''}
             </div>
             
             <div class="section">
                 <h3>🤖 About This Analysis</h3>
                 <p>This report was generated by SecuriVoice, an AI-powered voicemail phishing detection system. 
-                The analysis combines speech pattern recognition, content analysis, and known phishing indicators 
-                to assess the likelihood that a voicemail is a phishing attempt.</p>
+                The analysis combines speech-to-text conversion with advanced AI analysis to identify patterns and 
+                language commonly used in phishing attempts.</p>
                 
-                <p><em>Note: This is an automated analysis. Always use your judgment and verify through official channels 
-                when dealing with financial or personal information requests.</em></p>
+                <p><em>Note: This is an automated analysis powered by AI. While highly accurate, always use your 
+                judgment and verify through official channels when dealing with financial or personal information requests.</em></p>
             </div>
         </div>
         
@@ -153,28 +181,41 @@ def send_analysis_report(recipient_email: str, voicemail_data: dict) -> bool:
         # Generate the report
         html_report = generate_analysis_report(voicemail_data)
         
+        # Get risk level for subject line
+        risk_score = voicemail_data.get('risk_score', 5)
+        risk_level, _ = get_risk_level(risk_score)
+        
         # Create email message
         msg = MIMEMultipart('alternative')
         msg['From'] = f"{FROM_NAME} <{FROM_EMAIL}>"
         msg['To'] = recipient_email
-        msg['Subject'] = "🛡️ SecuriVoice Analysis Report - Your Voicemail Analysis Results"
+        msg['Subject'] = f"🛡️ SecuriVoice Analysis Report - {risk_level} Risk Detected"
         
         # Create plain text version
+        indicators_text = "\n".join([f"- {indicator}" for indicator in voicemail_data.get('indicators', [])])
+        explanation = voicemail_data.get('explanation', 'No explanation available')
+        caller_id_mismatch = voicemail_data.get('caller_id_mismatch', False)
+        
         text_content = f"""
 SecuriVoice Analysis Report
 
 Your voicemail from {voicemail_data.get('phone_number', 'Unknown')} has been analyzed.
 
+Risk Score: {risk_score}/10 ({risk_level} RISK)
+
 Transcription: {voicemail_data.get('transcribed_text', 'Transcription failed')}
 
-Risk Assessment: MEDIUM RISK (75%)
+Indicators Detected:
+{indicators_text if indicators_text else 'No major indicators detected'}
 
-This voicemail shows characteristics commonly associated with phishing attempts.
+AI Analysis: {explanation}
+
+{f'CALLER ID MISMATCH: The caller ID does not match phone numbers mentioned in the voicemail. This suggests phone number spoofing.' if caller_id_mismatch else ''}
 
 Recommendations:
-- Do not call back using the number provided
-- Contact institutions directly using official numbers
 - Verify any claims through official channels
+- Contact institutions directly using official numbers
+- Be cautious about providing personal information
 
 This is an automated analysis from SecuriVoice.
         """
@@ -210,7 +251,10 @@ def test_email_system():
         'phone_number': '833-622-3359',
         'transcribed_text': 'Hello, this is Mia Hayes from Spartan Finance. This is a reminder that you are currently pre-approved for a personal loan up to $60,000. After reviewing your credit profile, I believe this is a perfect time to take advantage of this offer. You can reach me directly at 833-622-3359. I will be looking forward to your call.',
         'file_name': 'test_voicemail.m4a',
-        'processed_at': datetime.now()
+        'processed_at': datetime.now(),
+        'risk_score': 7,
+        'indicators': ['CALLBACK PRESSURE', 'REWARD/URGENCY'],
+        'explanation': 'The voicemail creates a sense of urgency by presenting an "exclusive opportunity" and encourages immediate action by asking the recipient to call back.'
     }
     
     # Generate report (don't send, just preview)

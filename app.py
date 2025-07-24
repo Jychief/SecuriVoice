@@ -1,6 +1,6 @@
 from flask import Flask, render_template
 from email_handler import start_email_monitoring
-from db_operations import init_database
+from text_analysis import TextAnalyzer
 import threading
 
 app = Flask(__name__)
@@ -19,12 +19,15 @@ if __name__ == "__main__":
     print("🚀 Starting SecuriVoice")
     print("📝 Make sure your .env file is configured")
     
-    # Initialize database
+    # Initialize text analysis database
     print("💾 Initializing database...")
-    if init_database():
+    try:
+        analyzer = TextAnalyzer()
         print("✅ Database ready")
-    else:
-        print("❌ Database initialization failed - continuing anyway")
+    except Exception as e:
+        print(f"❌ Database initialization failed: {e}")
+        print("❌ Exiting...")
+        exit(1)
     
     print("📧 Starting email monitoring...")
     

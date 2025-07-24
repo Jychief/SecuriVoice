@@ -6,8 +6,9 @@ from dotenv import load_dotenv
 from threading import Event
 import traceback
 from speech_to_text import transcribe_audio
-from db_operations import save_voicemail, update_transcription, get_voicemail_by_email_uid, log_processing_success, log_processing_error
+from text_analysis import analyze_voicemail_text
 from email_response import send_analysis_report
+from datetime import datetime
 
 load_dotenv()
 
@@ -26,13 +27,6 @@ def process_email(uid, mail):
     """Process a single email and extract voicemail data"""
     print(f"Processing email with UID: {uid}")
     try:
-        # Check if we've already processed this email
-        email_uid_str = uid.decode()
-        existing_voicemail = get_voicemail_by_email_uid(email_uid_str)
-        if existing_voicemail:
-            print(f"⏭️ Email {email_uid_str} already processed, skipping...")
-            return
-        
         # Fetch the email
         status, msg_data = mail.fetch(uid, '(RFC822)')
         if status != 'OK':
@@ -79,75 +73,67 @@ def process_email(uid, mail):
                     except Exception as e:
                         print(f"Error saving attachment: {e}")
 
-        # Save voicemail to database first (even without transcription)
-        voicemail_id = None
-        if saved_file:
-            voicemail_id = save_voicemail(
-                sender_email=sender_email,
-                subject=subject,
-                phone_number=phone_number,
-                email_uid=email_uid_str,
-                file_path=saved_file
-            )
+        # Process the voicemail if we have both phone number and audio file
+        if saved_file and phone_number:
+            try:
+                print(f"🎤 Starting speech-to-text conversion...")
+                # Convert audio to text using Whisper
+                transcript = transcribe_audio(saved_file)
+                print(f"📝 Transcript: {transcript[:200]}...")
+                
+                # Analyze the transcript for phishing indicators
+                print(f"🔍 Analyzing transcript for phishing indicators...")
+                db_id, analysis = analyze_voicemail_text(transcript, phone_number, saved_file)
+                
+                print(f"📊 Text analysis complete:")
+                print(f"   Risk Score: {analysis.risk_score}/10")
+                print(f"   Indicators: {', '.join(analysis.indicators)}")
+                print(f"   Explanation: {analysis.explanation}")
+                print(f"   Saved to database with ID: {db_id}")
+                
+                # Send analysis report email back to sender
+                try:
+                    print(f"📧 Preparing to send analysis report to {sender_email}...")
+                    
+                    # Prepare voicemail data for email report
+                    voicemail_data = {
+                        'phone_number': phone_number,
+                        'transcribed_text': transcript,
+                        'file_name': os.path.basename(saved_file),
+                        'processed_at': datetime.now(),
+                        'risk_score': analysis.risk_score,
+                        'indicators': analysis.indicators,
+                        'explanation': analysis.explanation,
+                        'caller_id_mismatch': analysis.caller_id_mismatch,
+                        'transcript_numbers': analysis.transcript_numbers
+                    }
+                    
+                    # Send the analysis report email
+                    email_sent = send_analysis_report(sender_email, voicemail_data)
+                    
+                    if email_sent:
+                        print(f"✅ Analysis report email sent to {sender_email}")
+                    else:
+                        print(f"❌ Failed to send analysis report email to {sender_email}")
+                        
+                except Exception as email_error:
+                    print(f"❌ Error sending analysis report email: {email_error}")
+                    traceback.print_exc()
+                
+            except Exception as e:
+                print(f"❌ Error processing voicemail: {e}")
+                traceback.print_exc()
+        else:
+            if not saved_file:
+                print("⚠️ No audio file found in email")
+            if not phone_number:
+                print("⚠️ No phone number found in email body")
 
         print(f"✅ Processed voicemail from {sender_email}")
         if phone_number:
             print(f"   Phone: {phone_number}")
         if saved_file:
             print(f"   File: {saved_file}")
-            if voicemail_id:
-                print(f"   💾 Database ID: {voicemail_id}")
-            
-            # Transcribe the audio file
-            try:
-                print("🎤 Transcribing audio...")
-                start_time = time.time()
-                transcribed_text = transcribe_audio(saved_file)
-                transcription_time = time.time() - start_time
-                
-                print("✅ Transcription complete:")
-                print(f"📝 Text: {transcribed_text}")
-                
-                # Update database with transcription
-                if voicemail_id:
-                    update_transcription(voicemail_id, transcribed_text)
-                    log_processing_success(voicemail_id, "transcription", "Audio transcribed successfully", transcription_time)
-                    print(f"   💾 Saved to database with transcription")
-                
-                # Send analysis report to user
-                try:
-                    print("📧 Generating and sending analysis report...")
-                    
-                    # Prepare voicemail data for report
-                    voicemail_data = {
-                        'phone_number': phone_number,
-                        'transcribed_text': transcribed_text,
-                        'file_name': os.path.basename(saved_file),
-                        'processed_at': time.strftime("%B %d, %Y at %I:%M %p")
-                    }
-                    
-                    # Send report via email
-                    if send_analysis_report(sender_email, voicemail_data):
-                        if voicemail_id:
-                            log_processing_success(voicemail_id, "email_response", "Analysis report sent successfully")
-                        print("   ✅ Analysis report sent")
-                    else:
-                        if voicemail_id:
-                            log_processing_error(voicemail_id, "email_response", "Failed to send analysis report")
-                        print("   ❌ Failed to send analysis report")
-                        
-                except Exception as e:
-                    print(f"❌ Error sending analysis report: {e}")
-                    if voicemail_id:
-                        log_processing_error(voicemail_id, "email_response", str(e))
-                
-                # TODO: Add phishing analysis here
-                
-            except Exception as e:
-                print(f"❌ Transcription failed: {e}")
-                if voicemail_id:
-                    log_processing_error(voicemail_id, "transcription", str(e))
-                traceback.print_exc()
         
         # Mark email as read
         mail.store(uid, '+FLAGS', '\\Seen')
@@ -155,7 +141,6 @@ def process_email(uid, mail):
         
     except Exception as e:
         print(f"❌ Error processing email {uid}: {e}")
-        log_processing_error(None, "email_processing", str(e))
         traceback.print_exc()
 
 def polling_loop():
@@ -168,10 +153,12 @@ def polling_loop():
     while not stop_event.is_set():
         mail = None
         try:
-            # Connect to email server (silently during normal operation)
+            # Connect to email server
+            print("📧 Connecting to email server...")
             mail = imaplib.IMAP4_SSL(EMAIL_HOST)
             mail.login(EMAIL_USER, EMAIL_PASS)
             mail.select('inbox')
+            print("✅ Connected successfully")
             
             # Get current email count
             status, data = mail.search(None, 'ALL')
@@ -225,16 +212,22 @@ def polling_loop():
     print("🛑 Email polling stopped")
 
 def start_email_monitoring():
-    """Start the email monitoring system - called by Flask app"""
-    print("🔧 Initializing email monitoring...")
-    
-    # Test connection first
-    if test_connection():
-        print("✅ Email connection test passed")
-        print("🔄 Starting continuous polling...")
+    """Start the email monitoring system"""
+    try:
         polling_loop()
-    else:
-        print("❌ Email connection test failed - monitoring not started")
+    except KeyboardInterrupt:
+        print("\n🛑 Stopping email monitoring...")
+        stop_event.set()
+        print("✅ Email monitoring stopped")
+
+def start_email_monitoring():
+    """Start the email monitoring system"""
+    try:
+        polling_loop()
+    except KeyboardInterrupt:
+        print("\n🛑 Stopping email monitoring...")
+        stop_event.set()
+        print("✅ Email monitoring stopped")
 
 def test_connection():
     """Test email connection without polling"""
