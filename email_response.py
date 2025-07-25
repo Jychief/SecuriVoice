@@ -339,14 +339,11 @@ This is an automated analysis from SecuriVoice with enhanced AI voice detection.
         msg.attach(html_part)
         
         # Send email
-        print(f"📧 Sending analysis report to {recipient_email}...")
-        
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
         
-        print(f"✅ Analysis report sent successfully to {recipient_email}")
         return True
         
     except Exception as e:

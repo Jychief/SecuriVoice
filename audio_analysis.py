@@ -397,29 +397,36 @@ class AudioAnalyzer:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 
+                # Check which columns already exist
+                cursor.execute("PRAGMA table_info(voicemail_submissions)")
+                existing_columns = {row[1] for row in cursor.fetchall()}
+                
                 # Add new columns for audio analysis
                 new_columns = [
-                    "audio_risk_score INTEGER DEFAULT NULL",
-                    "audio_analysis TEXT DEFAULT NULL",
-                    "audio_indicators TEXT DEFAULT NULL", 
-                    "audio_confidence REAL DEFAULT NULL",
-                    "is_ai_generated BOOLEAN DEFAULT NULL",
-                    "audio_metrics TEXT DEFAULT NULL",
-                    "audio_analysis_date TIMESTAMP DEFAULT NULL"
+                    ("audio_risk_score", "INTEGER DEFAULT NULL"),
+                    ("audio_analysis", "TEXT DEFAULT NULL"),
+                    ("audio_indicators", "TEXT DEFAULT NULL"), 
+                    ("audio_confidence", "REAL DEFAULT NULL"),
+                    ("is_ai_generated", "BOOLEAN DEFAULT NULL"),
+                    ("audio_metrics", "TEXT DEFAULT NULL"),
+                    ("audio_analysis_date", "TIMESTAMP DEFAULT NULL")
                 ]
                 
-                for column in new_columns:
-                    try:
-                        cursor.execute(f'ALTER TABLE voicemail_submissions ADD COLUMN {column}')
-                        logger.info(f"✅ Added column: {column.split()[0]}")
-                    except sqlite3.OperationalError as e:
-                        if "duplicate column name" in str(e):
-                            logger.info(f"📋 Column already exists: {column.split()[0]}")
-                        else:
-                            raise
+                columns_added = 0
+                for column_name, column_def in new_columns:
+                    if column_name not in existing_columns:
+                        try:
+                            cursor.execute(f'ALTER TABLE voicemail_submissions ADD COLUMN {column_name} {column_def}')
+                            columns_added += 1
+                        except sqlite3.OperationalError as e:
+                            if "duplicate column name" not in str(e):
+                                raise
                 
                 conn.commit()
-                logger.info("✅ Database schema updated for audio analysis")
+                
+                # Only log if we actually added columns
+                if columns_added > 0:
+                    logger.info(f"✅ Added {columns_added} new columns to database schema")
                 
         except Exception as e:
             logger.error(f"❌ Failed to update database schema: {e}")
