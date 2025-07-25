@@ -99,6 +99,11 @@ class TextAnalyzer:
             r'\b\d{3}\.\d{3}\.\d{4}\b',         # 123.456.7890
             r'\b\d{10}\b',                      # 1234567890
             r'\b1[-\s]?\d{3}[-\s]?\d{3}[-\s]?\d{4}\b',  # 1-123-456-7890 or 1 123 456 7890
+            # NEW: Handle spoken numbers with dashes between each digit
+            r'\b1-\d-\d-\d-\d{7}\b',            # 1-8-0-0-5550199 (partial)
+            r'\b1-\d-\d-\d-\d-\d-\d-\d-\d-\d-\d\b',  # 1-8-0-0-5-5-5-0-1-9-9
+            r'\b\d-\d-\d-\d-\d{6}\b',           # 8-0-0-555199 (8 digit start)
+            r'\b\d-\d-\d-\d-\d-\d-\d-\d-\d-\d\b',    # 8-0-0-5-5-5-0-1-9-9
         ]
         
         found_numbers = []
@@ -108,15 +113,98 @@ class TextAnalyzer:
             for match in matches:
                 # Clean the number (remove formatting)
                 clean_number = re.sub(r'[^\d]', '', match)
-                # Remove leading 1 if present (country code)
+                
+                # Handle different length numbers
                 if len(clean_number) == 11 and clean_number.startswith('1'):
+                    # Remove leading 1 (country code)
                     clean_number = clean_number[1:]
+                elif len(clean_number) == 10:
+                    # Perfect 10-digit number
+                    pass
+                elif len(clean_number) > 10:
+                    # Try to extract a 10-digit number from longer sequences
+                    # Look for patterns like area code + 7 digits
+                    if len(clean_number) >= 10:
+                        # Take the last 10 digits (most common case)
+                        clean_number = clean_number[-10:]
+                else:
+                    # Too short, skip
+                    continue
+                
                 # Only keep 10-digit numbers
-                if len(clean_number) == 10:
+                if len(clean_number) == 10 and clean_number.isdigit():
                     found_numbers.append(clean_number)
+        
+        # Advanced pattern: Look for spoken number sequences in transcripts
+        # Handle cases like "call us back at one eight zero zero five five five zero one nine nine"
+        spoken_patterns = self._extract_spoken_numbers(text)
+        found_numbers.extend(spoken_patterns)
         
         # Remove duplicates while preserving order
         return list(dict.fromkeys(found_numbers))
+    
+    def _extract_spoken_numbers(self, text: str) -> List[str]:
+        """
+        Extract phone numbers from spoken/written out numbers
+        
+        Args:
+            text: Text containing potentially spoken numbers
+            
+        Returns:
+            List of phone numbers extracted from spoken format
+        """
+        found_numbers = []
+        
+        # Word to digit mapping
+        word_to_digit = {
+            'zero': '0', 'oh': '0', 'o': '0',
+            'one': '1', 'won': '1',
+            'two': '2', 'to': '2', 'too': '2',
+            'three': '3', 'tree': '3',
+            'four': '4', 'for': '4', 'fore': '4',
+            'five': '5',
+            'six': '6', 'six': '6',
+            'seven': '7',
+            'eight': '8', 'ate': '8',
+            'nine': '9'
+        }
+        
+        # Look for sequences like "one eight zero zero five five five..."
+        # Split text into words and look for number word sequences
+        words = re.findall(r'\b\w+\b', text.lower())
+        
+        number_sequences = []
+        current_sequence = []
+        
+        for word in words:
+            if word in word_to_digit:
+                current_sequence.append(word_to_digit[word])
+            elif word.isdigit() and len(word) == 1:
+                current_sequence.append(word)
+            else:
+                if len(current_sequence) >= 7:  # At least 7 digits for a phone number
+                    number_sequences.append(''.join(current_sequence))
+                current_sequence = []
+        
+        # Check final sequence
+        if len(current_sequence) >= 7:
+            number_sequences.append(''.join(current_sequence))
+        
+        # Process found sequences
+        for sequence in number_sequences:
+            if len(sequence) == 10:
+                found_numbers.append(sequence)
+            elif len(sequence) == 11 and sequence.startswith('1'):
+                found_numbers.append(sequence[1:])  # Remove leading 1
+            elif len(sequence) > 10:
+                # Try to find a 10-digit subsequence
+                for i in range(len(sequence) - 9):
+                    substr = sequence[i:i+10]
+                    if substr[0] != '0' and substr[0] != '1':  # Valid area code
+                        found_numbers.append(substr)
+                        break
+        
+        return found_numbers
     
     def check_caller_id_mismatch(self, submitted_number: str, transcript: str) -> Tuple[bool, List[str]]:
         """
@@ -138,10 +226,14 @@ class TextAnalyzer:
         transcript_numbers = self.extract_phone_numbers(transcript)
         
         logger.info(f"📞 Caller ID: {clean_submitted}")
-        logger.info(f"📝 Numbers in transcript: {transcript_numbers}")
+        logger.info(f"📝 Numbers found in transcript: {transcript_numbers}")
+        
+        # Debug: Show what we're looking for in the raw transcript
+        logger.info(f"📄 Transcript excerpt: {transcript[:200]}...")
         
         # If no numbers in transcript, no mismatch can be determined
         if not transcript_numbers:
+            logger.info(f"ℹ️ No phone numbers found in transcript")
             return False, transcript_numbers
         
         # Check if submitted number matches any number in transcript
@@ -447,15 +539,17 @@ def analyze_voicemail_text(transcript: str, phone_number: str,
 if __name__ == "__main__":
     # Test the analyzer
     test_transcript = """
-    Hello, this is an urgent message regarding your bank account. 
-    Suspicious activity has been detected, and immediate action is required. 
-    Please call us back at this number to verify your information and avoid 
-    permanent account suspension. Thank you.
+    Hello, this is David from the Fraud Prevention Department at your bank. 
+    We've detected suspicious activity on your account, ending in 4782. 
+    Someone has attempted to make a large purchase from your account just 20 minutes ago. 
+    For your security, we've temporarily frozen your account. 
+    To verify your identity and restore access, you need to call us back immediately at 1-8-0-0-5550199.
+    Please have your full account number, social security number, and the pin you use for online banking ready.
     """
     
     try:
         analyzer = TextAnalyzer()
-        analysis = analyzer.analyze_transcript(test_transcript, "5551234567")
+        analysis = analyzer.analyze_transcript(test_transcript, "7747739012")
         
         print("="*50)
         print("PHISHING ANALYSIS RESULTS")
@@ -467,7 +561,7 @@ if __name__ == "__main__":
         print(f"Numbers in Transcript: {analysis.transcript_numbers}")
         
         # Save to database
-        db_id = analyzer.save_analysis("5551234567", analysis)
+        db_id = analyzer.save_analysis("7747739012", analysis)
         print(f"\n✅ Saved to database with ID: {db_id}")
         
     except Exception as e:

@@ -51,13 +51,20 @@ class AudioAnalyzer:
         self.model = None
         self.feature_extractor = None
         
-        logger.info(f"Initializing VoiceGUARD audio analyzer on device: {self.device}")
+        # Only log initialization once per session
+        if not hasattr(AudioAnalyzer, '_initialized'):
+            logger.info(f"🎵 Initializing VoiceGUARD on {self.device}")
+            AudioAnalyzer._initialized = True
+        
         self._load_model()
     
     def _load_model(self):
         """Load the VoiceGUARD model and feature extractor"""
         try:
-            logger.info(f"Loading VoiceGUARD model: {self.model_name}")
+            # Only log loading if not already cached
+            if not hasattr(AudioAnalyzer, '_model_loaded'):
+                logger.info(f"📥 Loading VoiceGUARD model...")
+                AudioAnalyzer._model_loaded = True
             
             # Load the feature extractor and model
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(self.model_name)
@@ -67,7 +74,10 @@ class AudioAnalyzer:
             self.model = self.model.to(self.device)
             self.model.eval()
             
-            logger.info(f"✅ VoiceGUARD model loaded successfully")
+            # Only log success once
+            if AudioAnalyzer._model_loaded:
+                logger.info(f"✅ VoiceGUARD ready")
+                AudioAnalyzer._model_loaded = False  # Prevent further logging
             
         except Exception as e:
             logger.error(f"❌ Failed to load VoiceGUARD model: {e}")
@@ -194,6 +204,11 @@ class AudioAnalyzer:
             # Calculate audio quality metrics
             audio_metrics = self._calculate_audio_quality_metrics(waveform, sample_rate)
             
+            # Debug: Log audio characteristics (condensed)
+            logger.info(f"🎵 Audio: {audio_metrics.get('duration_seconds', 0):.1f}s, "
+                       f"RMS={audio_metrics.get('rms_energy', 0):.3f}, "
+                       f"ZCR={audio_metrics.get('zero_crossing_rate', 0):.3f}")
+            
             # Prepare input for model using numpy array
             inputs = self.feature_extractor(
                 waveform,  # waveform is now numpy array
@@ -213,18 +228,48 @@ class AudioAnalyzer:
                 # Apply softmax to get probabilities
                 probabilities = torch.nn.functional.softmax(logits, dim=-1)
                 
-                # Get prediction (assuming label 1 = AI-generated, 0 = human)
+                # Get prediction
                 predicted_class = torch.argmax(probabilities, dim=-1).item()
                 confidence = torch.max(probabilities).item()
                 
-                # Determine if AI-generated
-                is_ai_generated = bool(predicted_class == 1)
+                # Multi-class interpretation for VoiceGUARD
+                if predicted_class >= 3:  # Classes 3, 4, 5, 6 likely indicate AI/synthetic
+                    is_ai_generated = True
+                else:  # Classes 0, 1, 2 likely indicate human
+                    is_ai_generated = False
                 
-                logger.info(f"🤖 VoiceGUARD prediction: {'AI-generated' if is_ai_generated else 'Human'} (confidence: {confidence:.3f})")
+                # Adjust confidence based on class prediction
+                if predicted_class >= 4 and confidence > 0.9:
+                    confidence = min(confidence, 0.95)
+                elif predicted_class == 3 and confidence > 0.8:
+                    confidence = min(confidence, 0.9)
+                elif predicted_class <= 2:
+                    confidence = min(confidence, 0.98)
+            
+            # Heuristic checks for AI characteristics
+            heuristic_ai_score = self._calculate_heuristic_ai_score(audio_metrics, waveform)
+            
+            # Enhanced decision logic: combine model prediction with heuristics
+            original_prediction = is_ai_generated
+            
+            if not is_ai_generated and heuristic_ai_score >= 3:  # Model says human but heuristics suggest AI
+                if confidence < 0.9:  # Not very confident in human prediction
+                    is_ai_generated = True
+                    confidence = 0.6 + (heuristic_ai_score * 0.1)  # Moderate confidence based on heuristics
+                    logger.info(f"🔄 Overriding: Human → AI (heuristic evidence)")
+            
+            elif is_ai_generated and heuristic_ai_score >= 2:  # Model says AI and heuristics agree
+                confidence = min(confidence + (heuristic_ai_score * 0.05), 0.98)  # Boost confidence
+            
+            elif is_ai_generated and heuristic_ai_score == 0:  # Model says AI but no heuristic evidence
+                if confidence < 0.7:  # Low confidence AI prediction
+                    confidence *= 0.8  # Reduce confidence slightly
+            
+            logger.info(f"🤖 VoiceGUARD: {'AI' if is_ai_generated else 'Human'} ({confidence:.3f}) | Heuristic: {heuristic_ai_score}/5")
             
             # Calculate risk score and indicators
             risk_score, indicators, explanation = self._calculate_audio_risk(
-                is_ai_generated, confidence, audio_metrics
+                is_ai_generated, confidence, audio_metrics, heuristic_ai_score
             )
             
             # Create analysis result
@@ -238,7 +283,7 @@ class AudioAnalyzer:
                 audio_quality_metrics=audio_metrics
             )
             
-            logger.info(f"✅ Audio analysis complete - AI Generated: {is_ai_generated}, Risk Score: {risk_score}/10")
+            logger.info(f"✅ Audio analysis complete - AI: {is_ai_generated}, Risk: {risk_score}/10")
             return analysis
             
         except Exception as e:
@@ -254,8 +299,73 @@ class AudioAnalyzer:
                 audio_quality_metrics={}
             )
     
+    def _calculate_heuristic_ai_score(self, audio_metrics: Dict, waveform: np.ndarray) -> int:
+        """
+        Calculate heuristic AI score based on audio characteristics
+        
+        Args:
+            audio_metrics: Audio quality metrics
+            waveform: Raw audio waveform
+            
+        Returns:
+            Heuristic AI score (0-5, higher = more likely AI)
+        """
+        score = 0
+        
+        try:
+            duration = audio_metrics.get('duration_seconds', 0)
+            rms_energy = audio_metrics.get('rms_energy', 0)
+            zero_crossing_rate = audio_metrics.get('zero_crossing_rate', 0)
+            spectral_centroid = audio_metrics.get('spectral_centroid_mean', 0)
+            dynamic_range = audio_metrics.get('dynamic_range', 0)
+            
+            # 1. Unnatural silence/background noise (common in TTS)
+            if rms_energy < 0.005:  # Very quiet background
+                score += 1
+                logger.info("🔍 Heuristic +1: Very low background noise")
+            
+            # 2. Unnatural zero crossing rate (robotic speech patterns)
+            if zero_crossing_rate > 0.25 or zero_crossing_rate < 0.05:
+                score += 1
+                logger.info(f"🔍 Heuristic +1: Unusual zero crossing rate ({zero_crossing_rate:.3f})")
+            
+            # 3. Limited dynamic range (compressed/processed audio)
+            if dynamic_range < 0.2:
+                score += 1
+                logger.info(f"🔍 Heuristic +1: Low dynamic range ({dynamic_range:.3f})")
+            
+            # 4. Spectral characteristics (unnatural frequency distribution)
+            if spectral_centroid > 3000 or spectral_centroid < 500:
+                score += 1
+                logger.info(f"🔍 Heuristic +1: Unusual spectral centroid ({spectral_centroid:.0f} Hz)")
+            
+            # 5. Advanced analysis: Check for periodic patterns (TTS artifacts)
+            try:
+                # Calculate autocorrelation to detect unnatural periodicity
+                autocorr = np.correlate(waveform, waveform, mode='full')
+                autocorr = autocorr[autocorr.size // 2:]
+                
+                # Look for strong periodic patterns (excluding fundamental frequency)
+                if len(autocorr) > 1000:
+                    # Check for artificial periodicity in mid-range
+                    mid_range = autocorr[200:800]
+                    if len(mid_range) > 0:
+                        periodicity_strength = np.max(mid_range) / np.mean(mid_range)
+                        if periodicity_strength > 3.0:  # Strong artificial periodicity
+                            score += 1
+                            logger.info(f"🔍 Heuristic +1: Strong artificial periodicity ({periodicity_strength:.2f})")
+                            
+            except Exception as e:
+                logger.debug(f"Periodicity analysis failed: {e}")
+            
+            logger.info(f"🎯 Total heuristic AI score: {score}/5")
+            return score
+            
+        except Exception as e:
+            logger.error(f"❌ Heuristic analysis failed: {e}")
+            return 0
     def _calculate_audio_risk(self, is_ai_generated: bool, confidence: float, 
-                            audio_metrics: Dict) -> Tuple[int, list, str]:
+                            audio_metrics: Dict, heuristic_score: int = 0) -> Tuple[int, list, str]:
         """
         Calculate risk score based on audio analysis results
         
@@ -263,6 +373,7 @@ class AudioAnalyzer:
             is_ai_generated: Whether audio is AI-generated
             confidence: Model confidence score
             audio_metrics: Audio quality metrics
+            heuristic_score: Heuristic AI detection score
             
         Returns:
             Tuple of (risk_score, indicators, explanation)
@@ -270,17 +381,37 @@ class AudioAnalyzer:
         indicators = []
         risk_score = 1
         
-        # AI-generated voice detection
+        logger.info(f"🎯 Risk calculation - AI: {is_ai_generated}, Confidence: {confidence:.3f}, Heuristic: {heuristic_score}")
+        
+        # AI-generated voice detection (ENHANCED SCORING)
         if is_ai_generated:
-            if confidence > 0.9:
-                risk_score += 4
+            if confidence > 0.85:  # Very high confidence (85%+)
+                risk_score += 7  # Major risk increase (was +6)
                 indicators.append("HIGH CONFIDENCE AI-GENERATED VOICE")
-            elif confidence > 0.7:
-                risk_score += 3
+            elif confidence > 0.7:  # High confidence (70-85%)
+                risk_score += 6  # Increased from +5
                 indicators.append("LIKELY AI-GENERATED VOICE")
-            else:
-                risk_score += 2
+            elif confidence > 0.6:  # Moderate confidence (60-70%)
+                risk_score += 5  # Increased from +4
                 indicators.append("POSSIBLE AI-GENERATED VOICE")
+            else:  # Lower confidence (50-60%)
+                risk_score += 4  # Increased from +3
+                indicators.append("SUSPECTED AI-GENERATED VOICE")
+            
+            # Extra penalty for extremely high confidence
+            if confidence > 0.95:
+                risk_score += 1
+                indicators.append("EXTREMELY HIGH AI CONFIDENCE")
+        
+        # Add risk based on heuristic analysis
+        if heuristic_score >= 4:
+            risk_score += 2
+            indicators.append("STRONG AI VOICE CHARACTERISTICS")
+        elif heuristic_score >= 3:
+            risk_score += 1
+            indicators.append("MULTIPLE AI VOICE INDICATORS")
+        elif heuristic_score >= 2:
+            indicators.append("SOME AI VOICE INDICATORS")
         
         # Audio quality indicators that might suggest synthetic audio
         duration = audio_metrics.get('duration_seconds', 0)
@@ -288,43 +419,68 @@ class AudioAnalyzer:
         zero_crossing_rate = audio_metrics.get('zero_crossing_rate', 0)
         dynamic_range = audio_metrics.get('dynamic_range', 0)
         
+        # Additional risk factors (but lower weight if already AI-detected)
+        additional_risk = 0
+        
         # Very short duration (robocalls are often brief)
         if duration < 15:
-            risk_score += 1
+            additional_risk += 1
             indicators.append("VERY SHORT DURATION")
         
         # Unusual audio characteristics
         if rms_energy < 0.01:  # Very low energy might indicate processed audio
-            risk_score += 1
+            additional_risk += 1
             indicators.append("LOW AUDIO ENERGY")
         
         if zero_crossing_rate > 0.3:  # High ZCR might indicate synthetic speech
-            risk_score += 1
+            additional_risk += 1
             indicators.append("HIGH ZERO CROSSING RATE")
         
         if dynamic_range < 0.1:  # Low dynamic range suggests compressed/processed audio
-            risk_score += 1
+            additional_risk += 1
             indicators.append("LOW DYNAMIC RANGE")
         
         # Background noise analysis
         if rms_energy > 0 and rms_energy < 0.005:
+            additional_risk += 1
             indicators.append("UNNATURAL SILENCE/NO BACKGROUND NOISE")
-            risk_score += 1
+        
+        # If AI is detected, reduce weight of additional factors (they're less important)
+        if is_ai_generated:
+            additional_risk = min(additional_risk, 2)  # Cap additional risk when AI detected
+        
+        risk_score += additional_risk
         
         # Cap risk score at 10
         risk_score = min(risk_score, 10)
         
+        logger.info(f"🎯 Final audio risk: {risk_score}/10")
+        
         # Generate explanation
         if is_ai_generated:
             explanation = f"VoiceGUARD detected this as an AI-generated voice with {confidence:.1%} confidence. "
-            explanation += "AI-generated voices are commonly used in vishing attacks to impersonate legitimate organizations. "
-            if confidence > 0.8:
-                explanation += "The high confidence suggests this is very likely a synthetic voice used for fraudulent purposes."
+            if confidence > 0.9:
+                explanation += "This extremely high confidence strongly indicates the use of text-to-speech or voice cloning technology. "
+            elif confidence > 0.8:
+                explanation += "This high confidence strongly suggests synthetic voice generation. "
             else:
-                explanation += "While the confidence is moderate, this still warrants caution as scammers increasingly use AI voice technology."
+                explanation += "This indicates likely synthetic voice generation. "
+                
+            if heuristic_score >= 3:
+                explanation += f"Additionally, heuristic analysis found {heuristic_score} AI voice characteristics. "
+            
+            explanation += "AI-generated voices are commonly used in vishing attacks to impersonate legitimate organizations and bypass voice recognition systems."
+            
+            if risk_score >= 8:
+                explanation += " This represents a very high risk for voice-based fraud."
+            elif risk_score >= 6:
+                explanation += " This represents a high risk for voice-based fraud."
+                
         else:
             explanation = f"VoiceGUARD classified this as a human voice with {confidence:.1%} confidence. "
-            explanation += "However, other audio characteristics are also analyzed for potential signs of manipulation or robocall patterns."
+            if heuristic_score >= 3:
+                explanation += f"However, heuristic analysis found {heuristic_score} characteristics often associated with AI-generated voices, which raises some concerns. "
+            explanation += "Other audio characteristics are also analyzed for potential signs of manipulation or robocall patterns."
             
             if any("DURATION" in ind or "ENERGY" in ind or "RANGE" in ind for ind in indicators):
                 explanation += " Some audio quality metrics suggest this could still be from an automated system."
@@ -485,27 +641,39 @@ if __name__ == "__main__":
     
     if len(sys.argv) > 1:
         test_file = sys.argv[1]
+        
+        if os.path.exists(test_file):
+            try:
+                analyzer = AudioAnalyzer()
+                analysis = analyzer.analyze_audio(test_file)
+                
+                print("="*50)
+                print("AUDIO ANALYSIS RESULTS")
+                print("="*50)
+                print(f"File: {analysis.audio_file_path}")
+                print(f"AI Generated: {analysis.is_ai_generated}")
+                print(f"Confidence: {analysis.confidence_score:.3f}")
+                print(f"Risk Score: {analysis.risk_score}/10")
+                print(f"Indicators: {', '.join(analysis.indicators)}")
+                print(f"Explanation: {analysis.explanation}")
+                print(f"Audio Metrics: {analysis.audio_quality_metrics}")
+                
+            except Exception as e:
+                print(f"❌ Test failed: {e}")
+        else:
+            print(f"❌ Audio file '{test_file}' not found")
+            print("Please provide a valid audio file path")
     else:
-        test_file = "sample_voicemail.m4a"
-    
-    if os.path.exists(test_file):
-        try:
-            analyzer = AudioAnalyzer()
-            analysis = analyzer.analyze_audio(test_file)
-            
-            print("="*50)
-            print("AUDIO ANALYSIS RESULTS")
-            print("="*50)
-            print(f"File: {analysis.audio_file_path}")
-            print(f"AI Generated: {analysis.is_ai_generated}")
-            print(f"Confidence: {analysis.confidence_score:.3f}")
-            print(f"Risk Score: {analysis.risk_score}/10")
-            print(f"Indicators: {', '.join(analysis.indicators)}")
-            print(f"Explanation: {analysis.explanation}")
-            print(f"Audio Metrics: {analysis.audio_quality_metrics}")
-            
-        except Exception as e:
-            print(f"❌ Test failed: {e}")
-    else:
-        print(f"Test file '{test_file}' not found")
+        print("🎵 SecuriVoice Audio Analysis")
+        print("="*30)
         print("Usage: python audio_analysis.py <audio_file>")
+        print("")
+        print("Examples:")
+        print("  python audio_analysis.py my_voicemail.m4a")
+        print("  python audio_analysis.py test_audio.wav")
+        print("  python audio_analysis.py sample.mp3")
+        print("")
+        print("Supported formats: .m4a, .wav, .mp3, .flac, .ogg")
+        print("")
+        print("This will analyze the audio file for AI-generated voice detection")
+        print("and display detailed results including risk scoring.")

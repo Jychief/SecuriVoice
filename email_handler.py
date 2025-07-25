@@ -7,7 +7,7 @@ from threading import Event
 import traceback
 from speech_to_text import transcribe_audio
 from text_analysis import analyze_voicemail_text
-from audio_analysis import analyze_voicemail_audio  # NEW IMPORT
+from audio_analysis import analyze_voicemail_audio
 from email_response import send_analysis_report
 from datetime import datetime
 
@@ -56,15 +56,18 @@ def process_email(uid, mail):
                 except Exception as e:
                     print(f"   ⚠️ Error reading text content: {e}")
             
-            # Look for .m4a attachments
+            # Look for audio attachments (.m4a, .wav, .mp3, etc.)
             if part.get('Content-Disposition'):
                 filename = part.get_filename()
-                if filename and filename.lower().endswith('.m4a'):
+                if filename and any(filename.lower().endswith(ext) for ext in ['.m4a', '.wav', '.mp3', '.flac', '.ogg']):
                     try:
-                        # Create safe filename
+                        # Create safe filename with original extension
                         safe_subject = "".join(c for c in subject if c.isalnum() or c in (' ', '-', '_')).strip()
                         safe_subject = safe_subject or "voicemail"
-                        saved_file = os.path.join(UPLOAD_DIR, f"{safe_subject}_{uid.decode()}.m4a")
+                        
+                        # Preserve original file extension
+                        file_ext = os.path.splitext(filename)[1].lower()
+                        saved_file = os.path.join(UPLOAD_DIR, f"{safe_subject}_{uid.decode()}{file_ext}")
                         
                         # Save the attachment
                         with open(saved_file, 'wb') as f:
