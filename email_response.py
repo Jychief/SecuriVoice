@@ -35,7 +35,7 @@ def get_risk_level(risk_score: int) -> tuple:
 
 def generate_analysis_report(voicemail_data: dict) -> str:
     """
-    Generate HTML analysis report template
+    Generate HTML analysis report template with audio analysis
     
     Args:
         voicemail_data: Dictionary containing voicemail information
@@ -50,20 +50,73 @@ def generate_analysis_report(voicemail_data: dict) -> str:
     file_name = voicemail_data.get('file_name', 'Unknown file')
     processed_at = voicemail_data.get('processed_at', datetime.now())
     
-    # Get actual analysis results
-    risk_score = voicemail_data.get('risk_score', 5)
+    # Get text analysis results
+    text_risk_score = voicemail_data.get('risk_score', 5)
     indicators = voicemail_data.get('indicators', [])
     explanation = voicemail_data.get('explanation', 'No explanation available')
     
-    # Convert risk score to level
-    risk_level, risk_class = get_risk_level(risk_score)
-    risk_percentage = risk_score * 10  # Convert 1-10 scale to percentage
+    # Get audio analysis results (NEW)
+    audio_analysis = voicemail_data.get('audio_analysis')
+    has_audio_analysis = voicemail_data.get('has_audio_analysis', False)
+    overall_risk_score = voicemail_data.get('overall_risk_score', text_risk_score)
+    
+    # Use overall risk score for display if available, otherwise text risk score
+    display_risk_score = overall_risk_score if has_audio_analysis else text_risk_score
+    risk_level, risk_class = get_risk_level(display_risk_score)
     
     # Format the processed date
     if isinstance(processed_at, str):
         processed_date = processed_at
     else:
         processed_date = processed_at.strftime("%B %d, %Y at %I:%M %p")
+    
+    # Generate audio analysis section
+    audio_section = ""
+    if has_audio_analysis and audio_analysis:
+        ai_status = "AI-Generated" if audio_analysis.is_ai_generated else "Human Voice"
+        confidence_pct = f"{audio_analysis.confidence_score:.1%}"
+        
+        audio_section = f"""
+        <div class="section">
+            <h3>🎵 Audio Analysis (VoiceGUARD AI Detection)</h3>
+            <div class="audio-analysis-box">
+                <div class="audio-result {'ai-detected' if audio_analysis.is_ai_generated else 'human-detected'}">
+                    <h4>Voice Type: {ai_status}</h4>
+                    <p><strong>Confidence:</strong> {confidence_pct}</p>
+                    <p><strong>Audio Risk Score:</strong> {audio_analysis.risk_score}/10</p>
+                </div>
+                
+                {'<div class="audio-indicators"><h4>Audio Indicators:</h4>' + "".join(f'<div class="indicator">• {indicator}</div>' for indicator in audio_analysis.indicators) + '</div>' if audio_analysis.indicators else ''}
+                
+                <div class="audio-explanation">
+                    <strong>Audio Analysis:</strong> {audio_analysis.explanation}
+                </div>
+            </div>
+        </div>
+        """
+    
+    # Generate combined risk breakdown
+    risk_breakdown_section = ""
+    if has_audio_analysis:
+        risk_breakdown_section = f"""
+        <div class="risk-breakdown-detailed">
+            <h4>Risk Score Breakdown:</h4>
+            <div class="breakdown-item">📝 <strong>Text Analysis:</strong> {text_risk_score}/10</div>
+            <div class="breakdown-item">🎵 <strong>Audio Analysis:</strong> {audio_analysis.risk_score if audio_analysis else 'N/A'}/10</div>
+            <div class="breakdown-item total">🎯 <strong>Overall Risk:</strong> {overall_risk_score}/10</div>
+            <p class="breakdown-note">Overall score is calculated as: 60% text analysis + 40% audio analysis</p>
+        </div>
+        """
+    else:
+        risk_breakdown_section = f"""
+        <div class="risk-breakdown-detailed">
+            <h4>Risk Score Breakdown:</h4>
+            <div class="breakdown-item">📝 <strong>Text Analysis:</strong> {text_risk_score}/10</div>
+            <div class="breakdown-item">🎵 <strong>Audio Analysis:</strong> Not available</div>
+            <div class="breakdown-item total">🎯 <strong>Total Risk:</strong> {text_risk_score}/10</div>
+            <p class="breakdown-note">Audio analysis requires additional processing time and may be included in future updates.</p>
+        </div>
+        """
     
     # Generate HTML report
     html_report = f"""
@@ -84,6 +137,18 @@ def generate_analysis_report(voicemail_data: dict) -> str:
             .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
             .warning {{ background-color: #f8d7da; color: #721c24; padding: 10px; border-radius: 4px; margin: 10px 0; }}
             .explanation {{ background-color: #e7f3ff; padding: 15px; border-radius: 8px; border-left: 4px solid #3498db; }}
+            
+            /* NEW: Audio analysis styles */
+            .audio-analysis-box {{ background-color: #f8f9fa; padding: 15px; border-radius: 8px; }}
+            .audio-result {{ padding: 15px; border-radius: 8px; margin-bottom: 15px; text-align: center; }}
+            .ai-detected {{ background-color: #f8d7da; color: #721c24; border: 2px solid #dc3545; }}
+            .human-detected {{ background-color: #d4edda; color: #155724; border: 2px solid #28a745; }}
+            .audio-indicators {{ margin: 15px 0; }}
+            .audio-explanation {{ background-color: #e7f3ff; padding: 10px; border-radius: 6px; margin-top: 15px; }}
+            .risk-breakdown-detailed {{ background-color: #f8f9fa; padding: 15px; border-radius: 8px; margin: 15px 0; }}
+            .breakdown-item {{ padding: 8px 0; border-bottom: 1px solid #dee2e6; }}
+            .breakdown-item.total {{ font-weight: bold; border-bottom: none; color: #2c3e50; }}
+            .breakdown-note {{ font-size: 0.9rem; color: #666; font-style: italic; margin-top: 10px; }}
         </style>
     </head>
     <body>
@@ -94,8 +159,10 @@ def generate_analysis_report(voicemail_data: dict) -> str:
         
         <div class="content">
             <div class="risk-score risk-{risk_class}">
-                Risk Score: {risk_score}/10 ({risk_level} RISK)
+                Overall Risk Score: {display_risk_score}/10 ({risk_level} RISK)
             </div>
+            
+            {risk_breakdown_section}
             
             <div class="section">
                 <h3>📞 Voicemail Details</h3>
@@ -111,22 +178,24 @@ def generate_analysis_report(voicemail_data: dict) -> str:
                 </div>
             </div>
             
-            {'<div class="section"><h3>⚠️ Suspicious Indicators Detected</h3>' + "".join(f'<div class="indicator">• {indicator}</div>' for indicator in indicators) + '</div>' if indicators else '<div class="section"><h3>✅ No Major Indicators Detected</h3><p>No significant phishing indicators were found in this voicemail.</p></div>'}
-            
             <div class="section">
-                <h3>🤖 AI Analysis</h3>
+                <h3>📊 Text Analysis</h3>
+                {'<h4>⚠️ Suspicious Text Indicators Detected</h4>' + "".join(f'<div class="indicator">• {indicator}</div>' for indicator in indicators) if indicators else '<h4>✅ No Major Text Indicators Detected</h4><p>No significant phishing indicators were found in the voicemail text.</p>'}
+                
                 <div class="explanation">
-                    <strong>Analysis:</strong> {explanation}
+                    <strong>Text Analysis:</strong> {explanation}
                     {f'<br><br><strong>⚠️ Caller ID Mismatch:</strong> The caller ID does not match any phone numbers mentioned in the voicemail (Found: {", ".join(voicemail_data.get("transcript_numbers", []))}). This suggests phone number spoofing.' if voicemail_data.get("caller_id_mismatch", False) else ''}
                 </div>
             </div>
+            
+            {audio_section}
             
             <div class="section">
                 <h3>🎯 Recommendations</h3>
                 
                 {f'''<div class="warning">
                     <strong>⚠️ HIGH RISK ALERT:</strong> This voicemail shows strong indicators of a phishing attempt. 
-                    Exercise extreme caution and do not provide any personal information.
+                    {'The use of AI-generated voice technology is particularly concerning as this is a common tactic in modern vishing attacks.' if has_audio_analysis and audio_analysis and audio_analysis.is_ai_generated else 'Exercise extreme caution and do not provide any personal information.'}
                 </div>
                 <h4>Immediate Actions:</h4>
                 <ul>
@@ -135,12 +204,14 @@ def generate_analysis_report(voicemail_data: dict) -> str:
                     <li>🏦 Contact your bank/institution directly using official numbers from their website</li>
                     <li>🗑️ Delete this voicemail immediately</li>
                     <li>📢 Consider reporting this number to authorities</li>
-                </ul>''' if risk_score >= 8 else f'''<h4>Recommended Actions:</h4>
+                    {'<li>🤖 Be aware that AI voice technology is being used - this may sound very convincing</li>' if has_audio_analysis and audio_analysis and audio_analysis.is_ai_generated else ''}
+                </ul>''' if display_risk_score >= 8 else f'''<h4>Recommended Actions:</h4>
                 <ul>
                     <li>🔍 Verify any claims through official channels before taking action</li>
                     <li>🏦 Contact institutions directly using official numbers from their website</li>
                     <li>⚠️ Be cautious about providing personal information</li>
-                    {'<li>🗑️ Consider deleting this voicemail if you determine it is suspicious</li>' if risk_score >= 5 else '<li>✅ This appears to be a legitimate message, but always verify when in doubt</li>'}
+                    {'<li>🗑️ Consider deleting this voicemail if you determine it is suspicious</li>' if display_risk_score >= 5 else '<li>✅ This appears to be a legitimate message, but always verify when in doubt</li>'}
+                    {'<li>🤖 Note: AI voice detection indicates this may be synthetically generated</li>' if has_audio_analysis and audio_analysis and audio_analysis.is_ai_generated else ''}
                 </ul>'''}
             </div>
             
@@ -148,7 +219,14 @@ def generate_analysis_report(voicemail_data: dict) -> str:
                 <h3>🤖 About This Analysis</h3>
                 <p>This report was generated by SecuriVoice, an AI-powered voicemail phishing detection system. 
                 The analysis combines speech-to-text conversion with advanced AI analysis to identify patterns and 
-                language commonly used in phishing attempts.</p>
+                language commonly used in phishing attempts{', plus VoiceGUARD AI voice detection to identify synthetically generated voices commonly used in modern vishing attacks' if has_audio_analysis else ''}.</p>
+                
+                <p><strong>Analysis Components:</strong></p>
+                <ul>
+                    <li>📝 <strong>Text Analysis:</strong> OpenAI GPT-4o-mini analyzes transcript content for phishing indicators</li>
+                    {'<li>🎵 <strong>Audio Analysis:</strong> VoiceGUARD (Wav2Vec2) detects AI-generated voices and audio anomalies</li>' if has_audio_analysis else '<li>🎵 <strong>Audio Analysis:</strong> Currently processing (may be included in future reports)</li>'}
+                    <li>📞 <strong>Caller ID Verification:</strong> Checks for phone number spoofing attempts</li>
+                </ul>
                 
                 <p><em>Note: This is an automated analysis powered by AI. While highly accurate, always use your 
                 judgment and verify through official channels when dealing with financial or personal information requests.</em></p>
@@ -157,6 +235,7 @@ def generate_analysis_report(voicemail_data: dict) -> str:
         
         <div class="footer">
             <p>SecuriVoice - Protecting you from voice-based phishing attacks</p>
+            <p>Enhanced with AI voice detection technology</p>
             <p>This report was generated automatically. Please do not reply to this email.</p>
         </div>
     </body>
@@ -167,7 +246,7 @@ def generate_analysis_report(voicemail_data: dict) -> str:
 
 def send_analysis_report(recipient_email: str, voicemail_data: dict) -> bool:
     """
-    Send analysis report via email
+    Send analysis report via email (UPDATED with audio analysis support)
     
     Args:
         recipient_email: Email address to send report to
@@ -181,34 +260,65 @@ def send_analysis_report(recipient_email: str, voicemail_data: dict) -> bool:
         # Generate the report
         html_report = generate_analysis_report(voicemail_data)
         
-        # Get risk level for subject line
-        risk_score = voicemail_data.get('risk_score', 5)
-        risk_level, _ = get_risk_level(risk_score)
+        # Get risk level for subject line (use overall risk if available)
+        has_audio_analysis = voicemail_data.get('has_audio_analysis', False)
+        display_risk_score = voicemail_data.get('overall_risk_score') if has_audio_analysis else voicemail_data.get('risk_score', 5)
+        risk_level, _ = get_risk_level(display_risk_score)
         
         # Create email message
         msg = MIMEMultipart('alternative')
         msg['From'] = f"{FROM_NAME} <{FROM_EMAIL}>"
         msg['To'] = recipient_email
-        msg['Subject'] = f"🛡️ SecuriVoice Analysis Report - {risk_level} Risk Detected"
         
-        # Create plain text version
+        # Enhanced subject line
+        subject_prefix = "🛡️ SecuriVoice Analysis Report"
+        if has_audio_analysis:
+            audio_analysis = voicemail_data.get('audio_analysis')
+            if audio_analysis and audio_analysis.is_ai_generated:
+                subject_prefix += " [AI VOICE DETECTED]"
+        
+        msg['Subject'] = f"{subject_prefix} - {risk_level} Risk Detected"
+        
+        # Create enhanced plain text version
         indicators_text = "\n".join([f"- {indicator}" for indicator in voicemail_data.get('indicators', [])])
         explanation = voicemail_data.get('explanation', 'No explanation available')
         caller_id_mismatch = voicemail_data.get('caller_id_mismatch', False)
+        
+        # Add audio analysis to plain text
+        audio_text = ""
+        if has_audio_analysis:
+            audio_analysis = voicemail_data.get('audio_analysis')
+            if audio_analysis:
+                ai_status = "AI-Generated" if audio_analysis.is_ai_generated else "Human Voice"
+                confidence_pct = f"{audio_analysis.confidence_score:.1%}"
+                audio_text = f"""
+Audio Analysis (VoiceGUARD):
+- Voice Type: {ai_status}
+- Confidence: {confidence_pct}
+- Audio Risk Score: {audio_analysis.risk_score}/10
+- Audio Indicators: {', '.join(audio_analysis.indicators)}
+- Audio Analysis: {audio_analysis.explanation}
+"""
         
         text_content = f"""
 SecuriVoice Analysis Report
 
 Your voicemail from {voicemail_data.get('phone_number', 'Unknown')} has been analyzed.
 
-Risk Score: {risk_score}/10 ({risk_level} RISK)
+Overall Risk Score: {display_risk_score}/10 ({risk_level} RISK)
+
+Risk Breakdown:
+- Text Analysis: {voicemail_data.get('risk_score', 'N/A')}/10
+- Audio Analysis: {voicemail_data.get('audio_analysis').risk_score if has_audio_analysis and voicemail_data.get('audio_analysis') else 'N/A'}/10
 
 Transcription: {voicemail_data.get('transcribed_text', 'Transcription failed')}
 
-Indicators Detected:
-{indicators_text if indicators_text else 'No major indicators detected'}
+Text Indicators Detected:
+{indicators_text if indicators_text else 'No major text indicators detected'}
 
-AI Analysis: {explanation}
+Text Analysis: {explanation}
+
+{audio_text}
 
 {f'CALLER ID MISMATCH: The caller ID does not match phone numbers mentioned in the voicemail. This suggests phone number spoofing.' if caller_id_mismatch else ''}
 
@@ -216,8 +326,9 @@ Recommendations:
 - Verify any claims through official channels
 - Contact institutions directly using official numbers
 - Be cautious about providing personal information
+{'- Be aware that AI voice technology may have been used' if has_audio_analysis and voicemail_data.get('audio_analysis') and voicemail_data.get('audio_analysis').is_ai_generated else ''}
 
-This is an automated analysis from SecuriVoice.
+This is an automated analysis from SecuriVoice with enhanced AI voice detection.
         """
         
         # Attach both versions
@@ -244,9 +355,17 @@ This is an automated analysis from SecuriVoice.
         return False
 
 def test_email_system():
-    """Test the email response system"""
+    """Test the email response system with audio analysis"""
     
-    # Test data
+    # Test data with mock audio analysis
+    class MockAudioAnalysis:
+        def __init__(self):
+            self.is_ai_generated = True
+            self.confidence_score = 0.92
+            self.risk_score = 8
+            self.indicators = ['HIGH CONFIDENCE AI-GENERATED VOICE', 'UNNATURAL SILENCE/NO BACKGROUND NOISE']
+            self.explanation = 'VoiceGUARD detected this as an AI-generated voice with 92% confidence. AI-generated voices are commonly used in vishing attacks to impersonate legitimate organizations. The high confidence suggests this is very likely a synthetic voice used for fraudulent purposes.'
+    
     test_voicemail_data = {
         'phone_number': '833-622-3359',
         'transcribed_text': 'Hello, this is Mia Hayes from Spartan Finance. This is a reminder that you are currently pre-approved for a personal loan up to $60,000. After reviewing your credit profile, I believe this is a perfect time to take advantage of this offer. You can reach me directly at 833-622-3359. I will be looking forward to your call.',
@@ -254,18 +373,24 @@ def test_email_system():
         'processed_at': datetime.now(),
         'risk_score': 7,
         'indicators': ['CALLBACK PRESSURE', 'REWARD/URGENCY'],
-        'explanation': 'The voicemail creates a sense of urgency by presenting an "exclusive opportunity" and encourages immediate action by asking the recipient to call back.'
+        'explanation': 'The voicemail creates a sense of urgency by presenting an "exclusive opportunity" and encourages immediate action by asking the recipient to call back.',
+        'caller_id_mismatch': False,
+        'transcript_numbers': ['833-622-3359'],
+        # NEW: Audio analysis data
+        'has_audio_analysis': True,
+        'audio_analysis': MockAudioAnalysis(),
+        'overall_risk_score': 9  # Combined score
     }
     
     # Generate report (don't send, just preview)
     report = generate_analysis_report(test_voicemail_data)
     
     # Save to file for preview
-    with open('sample_report.html', 'w', encoding='utf-8') as f:
+    with open('sample_report_with_audio.html', 'w', encoding='utf-8') as f:
         f.write(report)
     
-    print("✅ Sample report generated: sample_report.html")
-    print("🔍 Open this file in your browser to preview the report")
+    print("✅ Sample report with audio analysis generated: sample_report_with_audio.html")
+    print("🔍 Open this file in your browser to preview the enhanced report")
     
     # Uncomment to test actual email sending:
     # return send_analysis_report("your-test-email@example.com", test_voicemail_data)

@@ -7,6 +7,7 @@ from threading import Event
 import traceback
 from speech_to_text import transcribe_audio
 from text_analysis import analyze_voicemail_text
+from audio_analysis import analyze_voicemail_audio  # NEW IMPORT
 from email_response import send_analysis_report
 from datetime import datetime
 
@@ -83,29 +84,52 @@ def process_email(uid, mail):
                 
                 # Analyze the transcript for phishing indicators
                 print(f"🔍 Analyzing transcript for phishing indicators...")
-                db_id, analysis = analyze_voicemail_text(transcript, phone_number, saved_file)
+                db_id, text_analysis = analyze_voicemail_text(transcript, phone_number, saved_file)
                 
                 print(f"📊 Text analysis complete:")
-                print(f"   Risk Score: {analysis.risk_score}/10")
-                print(f"   Indicators: {', '.join(analysis.indicators)}")
-                print(f"   Explanation: {analysis.explanation}")
+                print(f"   Risk Score: {text_analysis.risk_score}/10")
+                print(f"   Indicators: {', '.join(text_analysis.indicators)}")
+                print(f"   Explanation: {text_analysis.explanation}")
                 print(f"   Saved to database with ID: {db_id}")
+                
+                # NEW: Analyze audio for AI-generated voice detection
+                print(f"🎵 Starting audio analysis for AI voice detection...")
+                try:
+                    overall_risk_score, audio_analysis = analyze_voicemail_audio(saved_file, db_id)
+                    
+                    print(f"🤖 Audio analysis complete:")
+                    print(f"   AI Generated: {audio_analysis.is_ai_generated}")
+                    print(f"   Confidence: {audio_analysis.confidence_score:.3f}")
+                    print(f"   Audio Risk Score: {audio_analysis.risk_score}/10")
+                    print(f"   Audio Indicators: {', '.join(audio_analysis.indicators)}")
+                    print(f"   Overall Risk Score: {overall_risk_score}/10")
+                    
+                except Exception as audio_error:
+                    print(f"⚠️ Audio analysis failed: {audio_error}")
+                    # Continue with text analysis only
+                    overall_risk_score = text_analysis.risk_score
+                    audio_analysis = None
+                    print(f"📊 Continuing with text analysis only, risk score: {overall_risk_score}/10")
                 
                 # Send analysis report email back to sender
                 try:
                     print(f"📧 Preparing to send analysis report to {sender_email}...")
                     
-                    # Prepare voicemail data for email report
+                    # Prepare voicemail data for email report (UPDATED with audio analysis)
                     voicemail_data = {
                         'phone_number': phone_number,
                         'transcribed_text': transcript,
                         'file_name': os.path.basename(saved_file),
                         'processed_at': datetime.now(),
-                        'risk_score': analysis.risk_score,
-                        'indicators': analysis.indicators,
-                        'explanation': analysis.explanation,
-                        'caller_id_mismatch': analysis.caller_id_mismatch,
-                        'transcript_numbers': analysis.transcript_numbers
+                        'risk_score': text_analysis.risk_score,
+                        'indicators': text_analysis.indicators,
+                        'explanation': text_analysis.explanation,
+                        'caller_id_mismatch': text_analysis.caller_id_mismatch,
+                        'transcript_numbers': text_analysis.transcript_numbers,
+                        # NEW: Audio analysis data
+                        'overall_risk_score': overall_risk_score,
+                        'audio_analysis': audio_analysis,
+                        'has_audio_analysis': audio_analysis is not None
                     }
                     
                     # Send the analysis report email
@@ -210,15 +234,6 @@ def polling_loop():
             stop_event.wait(15)
     
     print("🛑 Email polling stopped")
-
-def start_email_monitoring():
-    """Start the email monitoring system"""
-    try:
-        polling_loop()
-    except KeyboardInterrupt:
-        print("\n🛑 Stopping email monitoring...")
-        stop_event.set()
-        print("✅ Email monitoring stopped")
 
 def start_email_monitoring():
     """Start the email monitoring system"""
