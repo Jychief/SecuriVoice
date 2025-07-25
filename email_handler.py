@@ -10,6 +10,7 @@ from text_analysis import analyze_voicemail_text
 from audio_analysis import analyze_voicemail_audio
 from email_response import send_analysis_report
 from datetime import datetime
+import logging
 
 load_dotenv()
 
@@ -24,9 +25,15 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # Global stop event for clean shutdown
 stop_event = Event()
 
+# Configure logging to reduce noise
+logging.getLogger('speech_to_text').setLevel(logging.WARNING)
+logging.getLogger('text_analysis').setLevel(logging.WARNING)
+logging.getLogger('audio_analysis').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+
 def process_email(uid, mail):
     """Process a single email and extract voicemail data"""
-    print(f"\n📧 Processing email with UID: {uid.decode()}")
+    print(f"\n📧 Processing email UID: {uid.decode()}")
     try:
         # Fetch the email
         status, msg_data = mail.fetch(uid, '(RFC822)')
@@ -80,24 +87,24 @@ def process_email(uid, mail):
         # Process the voicemail if we have both phone number and audio file
         if saved_file and phone_number:
             try:
-                print(f"🎤 Converting speech-to-text...")
+                print(f"🎤 Processing audio...")
                 # Convert audio to text using Whisper
                 transcript = transcribe_audio(saved_file)
-                print(f"📝 Transcript ({len(transcript)} chars): {transcript[:100]}{'...' if len(transcript) > 100 else ''}")
+                print(f"📝 Transcript: {transcript[:100]}{'...' if len(transcript) > 100 else ''}")
                 
                 # Analyze the transcript for phishing indicators
-                print(f"🔍 Analyzing text for phishing indicators...")
+                print(f"🔍 Analyzing content...")
                 db_id, text_analysis = analyze_voicemail_text(transcript, phone_number, saved_file)
                 
-                print(f"📊 Text Analysis - Risk: {text_analysis.risk_score}/10 | Indicators: {len(text_analysis.indicators)} | DB ID: {db_id}")
+                print(f"📊 Text Risk: {text_analysis.risk_score}/10 | Indicators: {len(text_analysis.indicators)}")
                 
                 # Analyze audio for AI-generated voice detection
-                print(f"🎵 Analyzing audio for AI voice detection...")
+                print(f"🎵 Analyzing audio...")
                 try:
                     overall_risk_score, audio_analysis = analyze_voicemail_audio(saved_file, db_id)
                     
                     ai_status = "AI" if audio_analysis.is_ai_generated else "Human"
-                    print(f"🤖 Audio Analysis - Voice: {ai_status} ({audio_analysis.confidence_score:.3f}) | Risk: {audio_analysis.risk_score}/10 | Overall: {overall_risk_score}/10")
+                    print(f"🤖 Audio: {ai_status} | Risk: {audio_analysis.risk_score}/10 | Overall: {overall_risk_score}/10")
                     
                 except Exception as audio_error:
                     print(f"⚠️ Audio analysis failed: {audio_error}")
@@ -106,7 +113,7 @@ def process_email(uid, mail):
                 
                 # Send analysis report email back to sender
                 try:
-                    print(f"📤 Sending analysis report...")
+                    print(f"📤 Sending report...")
                     
                     # Prepare voicemail data for email report
                     voicemail_data = {
@@ -130,10 +137,10 @@ def process_email(uid, mail):
                     if email_sent:
                         print(f"✅ Report sent to {sender_email}")
                     else:
-                        print(f"❌ Failed to send report to {sender_email}")
+                        print(f"❌ Failed to send report")
                         
                 except Exception as email_error:
-                    print(f"❌ Email sending error: {email_error}")
+                    print(f"❌ Email error: {email_error}")
                 
             except Exception as e:
                 print(f"❌ Processing error: {e}")
@@ -147,19 +154,19 @@ def process_email(uid, mail):
 
         # Mark email as read
         mail.store(uid, '+FLAGS', '\\Seen')
-        print(f"✅ Completed processing\n")
+        print(f"✅ Processing complete\n")
         
     except Exception as e:
         print(f"❌ Error processing email {uid}: {e}")
-        traceback.print_exc()
 
 def polling_loop():
     """Main polling loop - checks for new emails every 15 seconds"""
-    print("🚀 Starting email polling system...")
+    print("🚀 Starting email monitoring...")
     
     last_email_count = 0
     processed_uids = set()
     connection_logged = False
+    check_count = 0
     
     while not stop_event.is_set():
         mail = None
@@ -200,8 +207,9 @@ def polling_loop():
                 
             elif current_count == last_email_count:
                 # Only show waiting message every 4th check (every minute) to reduce spam
-                if int(time.time()) % 60 < 15:  # Show once per minute
-                    print(f"⏳ No new emails. Total: {current_count} (checking every 15s...)")
+                check_count += 1
+                if check_count % 4 == 0:  # Show once per minute (every 4 checks)
+                    print(f"⏳ Monitoring... Total emails: {current_count}")
             else:
                 # Email count decreased (emails were deleted)
                 print(f"📉 Email count changed: {last_email_count} → {current_count}")
@@ -209,7 +217,7 @@ def polling_loop():
                 
         except Exception as e:
             print(f"❌ Connection error: {e}")
-            print("🔄 Will retry in 30 seconds...")
+            print("🔄 Retrying in 30 seconds...")
             connection_logged = False  # Reset to log reconnection
             stop_event.wait(30)
             continue
@@ -227,7 +235,7 @@ def polling_loop():
         if not stop_event.is_set():
             stop_event.wait(15)
     
-    print("🛑 Email polling stopped")
+    print("🛑 Email monitoring stopped")
 
 def start_email_monitoring():
     """Start the email monitoring system"""
