@@ -69,12 +69,50 @@ class TextAnalyzer:
                         transcript_numbers TEXT,
                         audio_risk_score INTEGER DEFAULT NULL,
                         overall_risk_score INTEGER DEFAULT NULL,
-                        analysis_date TIMESTAMP
+                        analysis_date TIMESTAMP,
+                        sender_email TEXT DEFAULT NULL
                     )
                 ''')
                 
+                # Check which columns already exist
+                cursor.execute("PRAGMA table_info(voicemail_submissions)")
+                existing_columns = {row[1] for row in cursor.fetchall()}
+                
+                # Add missing columns for community sharing and sender tracking
+                new_columns = [
+                    ("sender_email", "TEXT DEFAULT NULL"),
+                    ("community_permission", "BOOLEAN DEFAULT FALSE"),
+                    ("permission_granted_at", "TIMESTAMP DEFAULT NULL"),
+                    ("permission_email_uid", "TEXT DEFAULT NULL"),
+                    ("shared_to_community", "BOOLEAN DEFAULT FALSE"),
+                    ("shared_at", "TIMESTAMP DEFAULT NULL"),
+                    ("audio_risk_score", "INTEGER DEFAULT NULL"),
+                    ("overall_risk_score", "INTEGER DEFAULT NULL"),
+                    ("audio_analysis", "TEXT DEFAULT NULL"),
+                    ("audio_indicators", "TEXT DEFAULT NULL"), 
+                    ("audio_confidence", "REAL DEFAULT NULL"),
+                    ("is_ai_generated", "BOOLEAN DEFAULT NULL"),
+                    ("audio_metrics", "TEXT DEFAULT NULL"),
+                    ("audio_analysis_date", "TIMESTAMP DEFAULT NULL")
+                ]
+                
+                columns_added = 0
+                for column_name, column_def in new_columns:
+                    if column_name not in existing_columns:
+                        try:
+                            cursor.execute(f'ALTER TABLE voicemail_submissions ADD COLUMN {column_name} {column_def}')
+                            columns_added += 1
+                            logger.info(f"✅ Added column: {column_name}")
+                        except sqlite3.OperationalError as e:
+                            if "duplicate column name" not in str(e):
+                                raise
+                
                 conn.commit()
-                logger.info("✅ Database initialized successfully")
+                
+                if columns_added > 0:
+                    logger.info(f"✅ Database schema updated - added {columns_added} columns")
+                else:
+                    logger.info("✅ Database schema is up to date")
                 
         except Exception as e:
             logger.error(f"❌ Database initialization failed: {e}")
@@ -411,7 +449,7 @@ Respond ONLY with the JSON object, no additional text.
             raise
     
     def save_analysis(self, phone_number: str, analysis: PhishingAnalysis, 
-                     audio_file_path: Optional[str] = None) -> int:
+                     audio_file_path: Optional[str] = None, sender_email: Optional[str] = None) -> int:
         """
         Save the analysis results to the database
         
@@ -419,6 +457,7 @@ Respond ONLY with the JSON object, no additional text.
             phone_number: Phone number of the caller
             analysis: PhishingAnalysis object
             audio_file_path: Optional path to the audio file
+            sender_email: Email address of the person who submitted this
             
         Returns:
             ID of the saved record
@@ -444,8 +483,8 @@ Respond ONLY with the JSON object, no additional text.
                     INSERT INTO voicemail_submissions (
                         phone_number, transcript, transcript_hash, audio_file_path,
                         text_risk_score, text_analysis, text_indicators, 
-                        caller_id_mismatch, transcript_numbers, analysis_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        caller_id_mismatch, transcript_numbers, analysis_date, sender_email
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     phone_number,
                     analysis.transcript,
@@ -456,7 +495,8 @@ Respond ONLY with the JSON object, no additional text.
                     json.dumps(analysis.indicators),
                     analysis.caller_id_mismatch,
                     json.dumps(analysis.transcript_numbers),
-                    datetime.now()
+                    datetime.now(),
+                    sender_email
                 ))
                 
                 record_id = cursor.lastrowid
@@ -518,7 +558,7 @@ Respond ONLY with the JSON object, no additional text.
 
 
 def analyze_voicemail_text(transcript: str, phone_number: str, 
-                          audio_file_path: Optional[str] = None) -> Tuple[int, PhishingAnalysis]:
+                          audio_file_path: Optional[str] = None, sender_email: Optional[str] = None) -> Tuple[int, PhishingAnalysis]:
     """
     Convenience function to analyze voicemail text and save to database
     
@@ -526,13 +566,14 @@ def analyze_voicemail_text(transcript: str, phone_number: str,
         transcript: The voicemail transcript
         phone_number: Caller's phone number
         audio_file_path: Optional path to audio file
+        sender_email: Email address of the submitter
         
     Returns:
         Tuple of (database_id, analysis_object)
     """
     analyzer = TextAnalyzer()
     analysis = analyzer.analyze_transcript(transcript, phone_number)
-    db_id = analyzer.save_analysis(phone_number, analysis, audio_file_path)
+    db_id = analyzer.save_analysis(phone_number, analysis, audio_file_path, sender_email)
     return db_id, analysis
 
 
@@ -561,7 +602,7 @@ if __name__ == "__main__":
         print(f"Numbers in Transcript: {analysis.transcript_numbers}")
         
         # Save to database
-        db_id = analyzer.save_analysis("7747739012", analysis)
+        db_id = analyzer.save_analysis("7747739012", analysis, sender_email="test@example.com")
         print(f"\n✅ Saved to database with ID: {db_id}")
         
     except Exception as e:
