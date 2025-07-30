@@ -656,7 +656,7 @@ def polling_loop():
             # Check if we have new emails
             if current_count > last_email_count:
                 new_emails = current_count - last_email_count
-                print(f"🔔 Found {new_emails} new email{'s' if new_emails != 1 else ''}! Total: {current_count}")
+                print(f"🔔 Found {new_emails} total email{'s' if new_emails != 1 else ''}!")
                 
                 # Get all unseen emails
                 status, unseen_data = mail.search(None, 'UNSEEN')

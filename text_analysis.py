@@ -284,6 +284,38 @@ class TextAnalyzer:
         
         return is_mismatch, transcript_numbers
 
+    def _standardize_indicator(self, indicator: str) -> str:
+        """
+        Standardize indicator formatting to title case
+        
+        Args:
+            indicator: Raw indicator string
+            
+        Returns:
+            Standardized indicator string
+        """
+        # Convert to title case but preserve certain words in uppercase
+        indicator = indicator.strip()
+        
+        # Special handling for common abbreviations/terms that should stay uppercase
+        uppercase_words = ['AI', 'ID', 'IRS', 'FBI', 'CIA', 'SSN', 'PIN', 'ATM', 'URL', 'IP', 'DNS']
+        
+        # Split by spaces and process each word
+        words = indicator.split()
+        standardized_words = []
+        
+        for word in words:
+            # Remove any trailing punctuation for comparison
+            clean_word = word.rstrip('.,!?:;')
+            trailing_punct = word[len(clean_word):]
+            
+            if clean_word.upper() in uppercase_words:
+                standardized_words.append(clean_word.upper() + trailing_punct)
+            else:
+                standardized_words.append(clean_word.title() + trailing_punct)
+        
+        return ' '.join(standardized_words)
+
     def _create_analysis_prompt(self, transcript: str, phone_mismatch_info: str = "") -> str:
         """
         Create a detailed prompt for GPT-4o-mini to analyze the transcript
@@ -325,6 +357,16 @@ ANALYSIS CRITERIA:
 9. GRAMMAR/LANGUAGE: Poor grammar, unusual phrasing, robotic language
 10. VERIFICATION REQUESTS: Asking to "verify" information they should already have
 11. CALLER ID SPOOFING: Mismatched phone numbers between caller ID and callback numbers
+
+For indicators, use clear, descriptive phrases in title case format, such as:
+- "Threat Language"
+- "Fear Tactics" 
+- "Urgency Tactics"
+- "Authority Impersonation"
+- "Callback Pressure"
+- "Information Requests"
+- "Generic Greetings"
+- "Caller ID Spoofing"
 
 LEGITIMATE INDICATORS:
 - Specific account references, appointment confirmations
@@ -397,23 +439,25 @@ Respond ONLY with the JSON object, no additional text.
             
             analysis_data = json.loads(analysis_text)
             
-            # Get indicators from AI response
-            indicators = analysis_data.get('indicators', [])
+            # Get indicators from AI response and standardize them
+            raw_indicators = analysis_data.get('indicators', [])
+            standardized_indicators = [self._standardize_indicator(ind) for ind in raw_indicators]
+            
             risk_score = analysis_data.get('risk_score', 5)
             
             # Add caller ID mismatch to indicators if detected (avoid duplicates)
             if caller_id_mismatch:
                 # Check if any form of caller ID spoofing is already detected
-                spoofing_indicators = [ind for ind in indicators if 'CALLER' in ind.upper() or 'SPOOFING' in ind.upper()]
+                spoofing_indicators = [ind for ind in standardized_indicators if 'caller' in ind.lower() and 'spoofing' in ind.lower()]
                 if not spoofing_indicators:
-                    indicators.append("CALLER ID SPOOFING")
+                    standardized_indicators.append("Caller ID Spoofing")
                 # Increase risk score for caller ID mismatch
                 risk_score = min(10, risk_score + 2)
-                logger.info(f"🚨 Added CALLER ID SPOOFING indicator, risk score increased to {risk_score}")
+                logger.info(f"🚨 Added Caller ID Spoofing indicator, risk score increased to {risk_score}")
             
             # Remove any duplicate indicators while preserving order
             unique_indicators = []
-            for indicator in indicators:
+            for indicator in standardized_indicators:
                 if indicator not in unique_indicators:
                     unique_indicators.append(indicator)
             
@@ -438,7 +482,7 @@ Respond ONLY with the JSON object, no additional text.
             return PhishingAnalysis(
                 transcript=transcript,
                 risk_score=5,
-                indicators=["Analysis parsing failed"],
+                indicators=["Analysis Parsing Failed"],
                 explanation="Unable to complete automated analysis",
                 caller_id_mismatch=False,
                 transcript_numbers=[]

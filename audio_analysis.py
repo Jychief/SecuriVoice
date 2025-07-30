@@ -294,7 +294,7 @@ class AudioAnalyzer:
                 is_ai_generated=False,
                 confidence_score=0.5,
                 risk_score=5,
-                indicators=["Analysis failed"],
+                indicators=["Analysis Failed"],
                 explanation="Unable to complete audio analysis",
                 audio_quality_metrics={}
             )
@@ -364,6 +364,39 @@ class AudioAnalyzer:
         except Exception as e:
             logger.error(f"❌ Heuristic analysis failed: {e}")
             return 0
+
+    def _standardize_indicator(self, indicator: str) -> str:
+        """
+        Standardize indicator formatting to title case
+        
+        Args:
+            indicator: Raw indicator string
+            
+        Returns:
+            Standardized indicator string
+        """
+        # Convert to title case but preserve certain words in uppercase
+        indicator = indicator.strip()
+        
+        # Special handling for common abbreviations/terms that should stay uppercase
+        uppercase_words = ['AI', 'ID', 'IRS', 'FBI', 'CIA', 'SSN', 'PIN', 'ATM', 'URL', 'IP', 'DNS']
+        
+        # Split by spaces and process each word
+        words = indicator.split()
+        standardized_words = []
+        
+        for word in words:
+            # Remove any trailing punctuation for comparison
+            clean_word = word.rstrip('.,!?:;')
+            trailing_punct = word[len(clean_word):]
+            
+            if clean_word.upper() in uppercase_words:
+                standardized_words.append(clean_word.upper() + trailing_punct)
+            else:
+                standardized_words.append(clean_word.title() + trailing_punct)
+        
+        return ' '.join(standardized_words)
+
     def _calculate_audio_risk(self, is_ai_generated: bool, confidence: float, 
                             audio_metrics: Dict, heuristic_score: int = 0) -> Tuple[int, list, str]:
         """
@@ -387,31 +420,31 @@ class AudioAnalyzer:
         if is_ai_generated:
             if confidence > 0.85:  # Very high confidence (85%+)
                 risk_score += 7  # Major risk increase (was +6)
-                indicators.append("HIGH CONFIDENCE AI-GENERATED VOICE")
+                indicators.append("High Confidence AI-Generated Voice")
             elif confidence > 0.7:  # High confidence (70-85%)
                 risk_score += 6  # Increased from +5
-                indicators.append("LIKELY AI-GENERATED VOICE")
+                indicators.append("Likely AI-Generated Voice")
             elif confidence > 0.6:  # Moderate confidence (60-70%)
                 risk_score += 5  # Increased from +4
-                indicators.append("POSSIBLE AI-GENERATED VOICE")
+                indicators.append("Possible AI-Generated Voice")
             else:  # Lower confidence (50-60%)
                 risk_score += 4  # Increased from +3
-                indicators.append("SUSPECTED AI-GENERATED VOICE")
+                indicators.append("Suspected AI-Generated Voice")
             
             # Extra penalty for extremely high confidence
             if confidence > 0.95:
                 risk_score += 1
-                indicators.append("EXTREMELY HIGH AI CONFIDENCE")
+                indicators.append("Extremely High AI Confidence")
         
         # Add risk based on heuristic analysis
         if heuristic_score >= 4:
             risk_score += 2
-            indicators.append("STRONG AI VOICE CHARACTERISTICS")
+            indicators.append("Strong AI Voice Characteristics")
         elif heuristic_score >= 3:
             risk_score += 1
-            indicators.append("MULTIPLE AI VOICE INDICATORS")
+            indicators.append("Multiple AI Voice Indicators")
         elif heuristic_score >= 2:
-            indicators.append("SOME AI VOICE INDICATORS")
+            indicators.append("Some AI Voice Indicators")
         
         # Audio quality indicators that might suggest synthetic audio
         duration = audio_metrics.get('duration_seconds', 0)
@@ -425,25 +458,25 @@ class AudioAnalyzer:
         # Very short duration (robocalls are often brief)
         if duration < 15:
             additional_risk += 1
-            indicators.append("VERY SHORT DURATION")
+            indicators.append("Very Short Duration")
         
         # Unusual audio characteristics
         if rms_energy < 0.01:  # Very low energy might indicate processed audio
             additional_risk += 1
-            indicators.append("LOW AUDIO ENERGY")
+            indicators.append("Low Audio Energy")
         
         if zero_crossing_rate > 0.3:  # High ZCR might indicate synthetic speech
             additional_risk += 1
-            indicators.append("HIGH ZERO CROSSING RATE")
+            indicators.append("High Zero Crossing Rate")
         
         if dynamic_range < 0.1:  # Low dynamic range suggests compressed/processed audio
             additional_risk += 1
-            indicators.append("LOW DYNAMIC RANGE")
+            indicators.append("Low Dynamic Range")
         
         # Background noise analysis
         if rms_energy > 0 and rms_energy < 0.005:
             additional_risk += 1
-            indicators.append("UNNATURAL SILENCE/NO BACKGROUND NOISE")
+            indicators.append("Unnatural Silence/No Background Noise")
         
         # If AI is detected, reduce weight of additional factors (they're less important)
         if is_ai_generated:
@@ -453,6 +486,9 @@ class AudioAnalyzer:
         
         # Cap risk score at 10
         risk_score = min(risk_score, 10)
+        
+        # Standardize all indicators
+        standardized_indicators = [self._standardize_indicator(ind) for ind in indicators]
         
         logger.info(f"🎯 Final audio risk: {risk_score}/10")
         
@@ -482,10 +518,10 @@ class AudioAnalyzer:
                 explanation += f"However, heuristic analysis found {heuristic_score} characteristics often associated with AI-generated voices, which raises some concerns. "
             explanation += "Other audio characteristics are also analyzed for potential signs of manipulation or robocall patterns."
             
-            if any("DURATION" in ind or "ENERGY" in ind or "RANGE" in ind for ind in indicators):
+            if any("Duration" in ind or "Energy" in ind or "Range" in ind for ind in standardized_indicators):
                 explanation += " Some audio quality metrics suggest this could still be from an automated system."
         
-        return risk_score, indicators, explanation
+        return risk_score, standardized_indicators, explanation
     
     def save_audio_analysis(self, analysis: AudioAnalysis, db_record_id: int) -> bool:
         """
@@ -517,7 +553,7 @@ class AudioAnalyzer:
                 ''', (
                     analysis.risk_score,
                     analysis.explanation,
-                    str(analysis.indicators),  # Convert list to string
+                    ', '.join(analysis.indicators),  # Join indicators with comma
                     analysis.confidence_score,
                     analysis.is_ai_generated,
                     str(analysis.audio_quality_metrics),  # Convert dict to string
@@ -628,7 +664,7 @@ def analyze_voicemail_audio(audio_file_path: str, db_record_id: int) -> Tuple[in
             is_ai_generated=False,
             confidence_score=0.5,
             risk_score=5,
-            indicators=["Analysis failed"],
+            indicators=["Analysis Failed"],
             explanation="Audio analysis could not be completed",
             audio_quality_metrics={}
         )
