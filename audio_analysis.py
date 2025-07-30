@@ -10,14 +10,13 @@ from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2FeatureExtra
 import warnings
 import librosa
 import soundfile as sf
-# Remove torchaudio dependency - use librosa instead for Railway compatibility
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging - QUIETER for production
+logging.basicConfig(level=logging.WARNING)  # Changed from INFO to WARNING
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -53,7 +52,7 @@ class AudioAnalyzer:
         
         # Only log initialization once per session
         if not hasattr(AudioAnalyzer, '_initialized'):
-            logger.info(f"🎵 Initializing VoiceGUARD on {self.device}")
+            # QUIETER - no device logging unless error
             AudioAnalyzer._initialized = True
         
         self._load_model()
@@ -63,7 +62,7 @@ class AudioAnalyzer:
         try:
             # Only log loading if not already cached
             if not hasattr(AudioAnalyzer, '_model_loaded'):
-                logger.info(f"📥 Loading VoiceGUARD model...")
+                # QUIETER - minimal loading message
                 AudioAnalyzer._model_loaded = True
             
             # Load the feature extractor and model
@@ -76,7 +75,7 @@ class AudioAnalyzer:
             
             # Only log success once
             if AudioAnalyzer._model_loaded:
-                logger.info(f"✅ VoiceGUARD ready")
+                # QUIETER - no success message
                 AudioAnalyzer._model_loaded = False  # Prevent further logging
             
         except Exception as e:
@@ -109,7 +108,7 @@ class AudioAnalyzer:
             if waveform.ndim > 1:
                 waveform = np.mean(waveform, axis=0)
             
-            logger.info(f"🎵 Audio preprocessed: {waveform.shape} samples at {target_sample_rate}Hz")
+            # QUIETER - no preprocessing logs
             return waveform, target_sample_rate
             
         except Exception as e:
@@ -167,7 +166,7 @@ class AudioAnalyzer:
                 'audio_length': int(len(waveform))
             }
             
-            logger.info(f"📊 Audio metrics calculated: Duration={duration:.1f}s, RMS={rms_energy:.3f}")
+            # QUIETER - no metrics logging
             return metrics
             
         except Exception as e:
@@ -195,7 +194,7 @@ class AudioAnalyzer:
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
         
-        logger.info(f"🎤 Analyzing audio file: {audio_path}")
+        # QUIETER - no analysis start message
         
         try:
             # Preprocess audio
@@ -204,10 +203,7 @@ class AudioAnalyzer:
             # Calculate audio quality metrics
             audio_metrics = self._calculate_audio_quality_metrics(waveform, sample_rate)
             
-            # Debug: Log audio characteristics (condensed)
-            logger.info(f"🎵 Audio: {audio_metrics.get('duration_seconds', 0):.1f}s, "
-                       f"RMS={audio_metrics.get('rms_energy', 0):.3f}, "
-                       f"ZCR={audio_metrics.get('zero_crossing_rate', 0):.3f}")
+            # QUIETER - no debug logging of audio characteristics
             
             # Prepare input for model using numpy array
             inputs = self.feature_extractor(
@@ -256,7 +252,7 @@ class AudioAnalyzer:
                 if confidence < 0.9:  # Not very confident in human prediction
                     is_ai_generated = True
                     confidence = 0.6 + (heuristic_ai_score * 0.1)  # Moderate confidence based on heuristics
-                    logger.info(f"🔄 Overriding: Human → AI (heuristic evidence)")
+                    # QUIETER - no override logging
             
             elif is_ai_generated and heuristic_ai_score >= 2:  # Model says AI and heuristics agree
                 confidence = min(confidence + (heuristic_ai_score * 0.05), 0.98)  # Boost confidence
@@ -265,7 +261,7 @@ class AudioAnalyzer:
                 if confidence < 0.7:  # Low confidence AI prediction
                     confidence *= 0.8  # Reduce confidence slightly
             
-            logger.info(f"🤖 VoiceGUARD: {'AI' if is_ai_generated else 'Human'} ({confidence:.3f}) | Heuristic: {heuristic_ai_score}/5")
+            # QUIETER - no VoiceGUARD result logging
             
             # Calculate risk score and indicators
             risk_score, indicators, explanation = self._calculate_audio_risk(
@@ -283,7 +279,7 @@ class AudioAnalyzer:
                 audio_quality_metrics=audio_metrics
             )
             
-            logger.info(f"✅ Audio analysis complete - AI: {is_ai_generated}, Risk: {risk_score}/10")
+            # QUIETER - no completion message
             return analysis
             
         except Exception as e:
@@ -322,22 +318,19 @@ class AudioAnalyzer:
             # 1. Unnatural silence/background noise (common in TTS)
             if rms_energy < 0.005:  # Very quiet background
                 score += 1
-                logger.info("🔍 Heuristic +1: Very low background noise")
+                # QUIETER - no heuristic logging
             
             # 2. Unnatural zero crossing rate (robotic speech patterns)
             if zero_crossing_rate > 0.25 or zero_crossing_rate < 0.05:
                 score += 1
-                logger.info(f"🔍 Heuristic +1: Unusual zero crossing rate ({zero_crossing_rate:.3f})")
             
             # 3. Limited dynamic range (compressed/processed audio)
             if dynamic_range < 0.2:
                 score += 1
-                logger.info(f"🔍 Heuristic +1: Low dynamic range ({dynamic_range:.3f})")
             
             # 4. Spectral characteristics (unnatural frequency distribution)
             if spectral_centroid > 3000 or spectral_centroid < 500:
                 score += 1
-                logger.info(f"🔍 Heuristic +1: Unusual spectral centroid ({spectral_centroid:.0f} Hz)")
             
             # 5. Advanced analysis: Check for periodic patterns (TTS artifacts)
             try:
@@ -353,17 +346,17 @@ class AudioAnalyzer:
                         periodicity_strength = np.max(mid_range) / np.mean(mid_range)
                         if periodicity_strength > 3.0:  # Strong artificial periodicity
                             score += 1
-                            logger.info(f"🔍 Heuristic +1: Strong artificial periodicity ({periodicity_strength:.2f})")
                             
             except Exception as e:
-                logger.debug(f"Periodicity analysis failed: {e}")
+                pass  # Silent failure for periodicity analysis
             
-            logger.info(f"🎯 Total heuristic AI score: {score}/5")
+            # QUIETER - no total heuristic score logging
             return score
             
         except Exception as e:
             logger.error(f"❌ Heuristic analysis failed: {e}")
             return 0
+    
     def _calculate_audio_risk(self, is_ai_generated: bool, confidence: float, 
                             audio_metrics: Dict, heuristic_score: int = 0) -> Tuple[int, list, str]:
         """
@@ -381,7 +374,7 @@ class AudioAnalyzer:
         indicators = []
         risk_score = 1
         
-        logger.info(f"🎯 Risk calculation - AI: {is_ai_generated}, Confidence: {confidence:.3f}, Heuristic: {heuristic_score}")
+        # QUIETER - no risk calculation logging
         
         # AI-generated voice detection (ENHANCED SCORING)
         if is_ai_generated:
@@ -454,7 +447,7 @@ class AudioAnalyzer:
         # Cap risk score at 10
         risk_score = min(risk_score, 10)
         
-        logger.info(f"🎯 Final audio risk: {risk_score}/10")
+        # QUIETER - no final audio risk logging
         
         # Generate explanation
         if is_ai_generated:
@@ -540,7 +533,7 @@ class AudioAnalyzer:
                                  (overall_risk, db_record_id))
                 
                 conn.commit()
-                logger.info(f"✅ Audio analysis saved to database (Record ID: {db_record_id})")
+                # QUIETER - no save success logging
                 return True
                 
         except Exception as e:
@@ -582,7 +575,8 @@ class AudioAnalyzer:
                 
                 # Only log if we actually added columns
                 if columns_added > 0:
-                    logger.info(f"✅ Added {columns_added} new columns to database schema")
+                    # QUIETER - no schema update logging
+                    pass
                 
         except Exception as e:
             logger.error(f"❌ Failed to update database schema: {e}")
