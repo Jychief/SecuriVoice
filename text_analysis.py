@@ -13,8 +13,8 @@ import hashlib
 # Load environment variables
 load_dotenv()
 
-# Set up logging - QUIETER for production
-logging.basicConfig(level=logging.WARNING)  # Changed from INFO to WARNING
+# Set up logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # OpenAI API configuration
@@ -69,12 +69,50 @@ class TextAnalyzer:
                         transcript_numbers TEXT,
                         audio_risk_score INTEGER DEFAULT NULL,
                         overall_risk_score INTEGER DEFAULT NULL,
-                        analysis_date TIMESTAMP
+                        analysis_date TIMESTAMP,
+                        sender_email TEXT DEFAULT NULL
                     )
                 ''')
                 
+                # Check which columns already exist
+                cursor.execute("PRAGMA table_info(voicemail_submissions)")
+                existing_columns = {row[1] for row in cursor.fetchall()}
+                
+                # Add missing columns for community sharing and sender tracking
+                new_columns = [
+                    ("sender_email", "TEXT DEFAULT NULL"),
+                    ("community_permission", "BOOLEAN DEFAULT FALSE"),
+                    ("permission_granted_at", "TIMESTAMP DEFAULT NULL"),
+                    ("permission_email_uid", "TEXT DEFAULT NULL"),
+                    ("shared_to_community", "BOOLEAN DEFAULT FALSE"),
+                    ("shared_at", "TIMESTAMP DEFAULT NULL"),
+                    ("audio_risk_score", "INTEGER DEFAULT NULL"),
+                    ("overall_risk_score", "INTEGER DEFAULT NULL"),
+                    ("audio_analysis", "TEXT DEFAULT NULL"),
+                    ("audio_indicators", "TEXT DEFAULT NULL"), 
+                    ("audio_confidence", "REAL DEFAULT NULL"),
+                    ("is_ai_generated", "BOOLEAN DEFAULT NULL"),
+                    ("audio_metrics", "TEXT DEFAULT NULL"),
+                    ("audio_analysis_date", "TIMESTAMP DEFAULT NULL")
+                ]
+                
+                columns_added = 0
+                for column_name, column_def in new_columns:
+                    if column_name not in existing_columns:
+                        try:
+                            cursor.execute(f'ALTER TABLE voicemail_submissions ADD COLUMN {column_name} {column_def}')
+                            columns_added += 1
+                            logger.info(f"✅ Added column: {column_name}")
+                        except sqlite3.OperationalError as e:
+                            if "duplicate column name" not in str(e):
+                                raise
+                
                 conn.commit()
-                # REMOVED: Verbose success logging
+                
+                if columns_added > 0:
+                    logger.info(f"✅ Database schema updated - added {columns_added} columns")
+                else:
+                    logger.info("✅ Database schema is up to date")
                 
         except Exception as e:
             logger.error(f"❌ Database initialization failed: {e}")
@@ -225,10 +263,15 @@ class TextAnalyzer:
         # Extract numbers from transcript
         transcript_numbers = self.extract_phone_numbers(transcript)
         
-        # QUIETER logging - only log mismatches
+        logger.info(f"📞 Caller ID: {clean_submitted}")
+        logger.info(f"📝 Numbers found in transcript: {transcript_numbers}")
+        
+        # Debug: Show what we're looking for in the raw transcript
+        logger.info(f"📄 Transcript excerpt: {transcript[:200]}...")
         
         # If no numbers in transcript, no mismatch can be determined
         if not transcript_numbers:
+            logger.info(f"ℹ️ No phone numbers found in transcript")
             return False, transcript_numbers
         
         # Check if submitted number matches any number in transcript
@@ -236,6 +279,8 @@ class TextAnalyzer:
         
         if is_mismatch:
             logger.warning(f"⚠️ Caller ID mismatch detected! Caller: {clean_submitted}, Transcript: {transcript_numbers}")
+        else:
+            logger.info(f"✅ Caller ID matches transcript number")
         
         return is_mismatch, transcript_numbers
 
@@ -307,7 +352,7 @@ Respond ONLY with the JSON object, no additional text.
         if not transcript or not transcript.strip():
             raise ValueError("Transcript cannot be empty")
         
-        # QUIETER logging - only essential info
+        logger.info(f"🔍 Analyzing transcript: {transcript[:100]}...")
         
         # Check for caller ID mismatch if phone number provided
         caller_id_mismatch = False
@@ -342,6 +387,7 @@ Respond ONLY with the JSON object, no additional text.
             
             # Parse the JSON response
             analysis_text = response.choices[0].message.content.strip()
+            logger.info(f"📋 Raw AI response: {analysis_text}")
             
             # Clean up response (remove code blocks if present)
             if analysis_text.startswith("```json"):
@@ -363,12 +409,15 @@ Respond ONLY with the JSON object, no additional text.
                     indicators.append("CALLER ID SPOOFING")
                 # Increase risk score for caller ID mismatch
                 risk_score = min(10, risk_score + 2)
+                logger.info(f"🚨 Added CALLER ID SPOOFING indicator, risk score increased to {risk_score}")
             
             # Remove any duplicate indicators while preserving order
             unique_indicators = []
             for indicator in indicators:
                 if indicator not in unique_indicators:
                     unique_indicators.append(indicator)
+            
+            logger.info(f"🔍 Final indicators: {unique_indicators}")
             
             # Create PhishingAnalysis object
             analysis = PhishingAnalysis(
@@ -380,7 +429,7 @@ Respond ONLY with the JSON object, no additional text.
                 transcript_numbers=transcript_numbers
             )
             
-            # QUIETER success logging
+            logger.info(f"✅ Analysis complete - Risk Score: {analysis.risk_score}/10")
             return analysis
             
         except json.JSONDecodeError as e:
@@ -400,7 +449,7 @@ Respond ONLY with the JSON object, no additional text.
             raise
     
     def save_analysis(self, phone_number: str, analysis: PhishingAnalysis, 
-                     audio_file_path: Optional[str] = None) -> int:
+                     audio_file_path: Optional[str] = None, sender_email: Optional[str] = None) -> int:
         """
         Save the analysis results to the database
         
@@ -408,6 +457,7 @@ Respond ONLY with the JSON object, no additional text.
             phone_number: Phone number of the caller
             analysis: PhishingAnalysis object
             audio_file_path: Optional path to the audio file
+            sender_email: Email address of the person who submitted this
             
         Returns:
             ID of the saved record
@@ -425,7 +475,7 @@ Respond ONLY with the JSON object, no additional text.
                 existing = cursor.fetchone()
                 
                 if existing:
-                    # QUIETER logging
+                    logger.info(f"📋 Transcript already analyzed (ID: {existing[0]})")
                     return existing[0]
                 
                 # Insert new analysis
@@ -433,8 +483,8 @@ Respond ONLY with the JSON object, no additional text.
                     INSERT INTO voicemail_submissions (
                         phone_number, transcript, transcript_hash, audio_file_path,
                         text_risk_score, text_analysis, text_indicators, 
-                        caller_id_mismatch, transcript_numbers, analysis_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        caller_id_mismatch, transcript_numbers, analysis_date, sender_email
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     phone_number,
                     analysis.transcript,
@@ -445,13 +495,14 @@ Respond ONLY with the JSON object, no additional text.
                     json.dumps(analysis.indicators),
                     analysis.caller_id_mismatch,
                     json.dumps(analysis.transcript_numbers),
-                    datetime.now()
+                    datetime.now(),
+                    sender_email
                 ))
                 
                 record_id = cursor.lastrowid
                 conn.commit()
                 
-                # QUIETER logging
+                logger.info(f"✅ Analysis saved to database (ID: {record_id})")
                 return record_id
                 
         except Exception as e:
@@ -498,6 +549,7 @@ Respond ONLY with the JSON object, no additional text.
                         'submission_date': row[10]
                     })
                 
+                logger.info(f"📋 Retrieved {len(submissions)} submissions")
                 return submissions
                 
         except Exception as e:
@@ -506,7 +558,7 @@ Respond ONLY with the JSON object, no additional text.
 
 
 def analyze_voicemail_text(transcript: str, phone_number: str, 
-                          audio_file_path: Optional[str] = None) -> Tuple[int, PhishingAnalysis]:
+                          audio_file_path: Optional[str] = None, sender_email: Optional[str] = None) -> Tuple[int, PhishingAnalysis]:
     """
     Convenience function to analyze voicemail text and save to database
     
@@ -514,13 +566,14 @@ def analyze_voicemail_text(transcript: str, phone_number: str,
         transcript: The voicemail transcript
         phone_number: Caller's phone number
         audio_file_path: Optional path to audio file
+        sender_email: Email address of the submitter
         
     Returns:
         Tuple of (database_id, analysis_object)
     """
     analyzer = TextAnalyzer()
     analysis = analyzer.analyze_transcript(transcript, phone_number)
-    db_id = analyzer.save_analysis(phone_number, analysis, audio_file_path)
+    db_id = analyzer.save_analysis(phone_number, analysis, audio_file_path, sender_email)
     return db_id, analysis
 
 
@@ -549,7 +602,7 @@ if __name__ == "__main__":
         print(f"Numbers in Transcript: {analysis.transcript_numbers}")
         
         # Save to database
-        db_id = analyzer.save_analysis("7747739012", analysis)
+        db_id = analyzer.save_analysis("7747739012", analysis, sender_email="test@example.com")
         print(f"\n✅ Saved to database with ID: {db_id}")
         
     except Exception as e:
