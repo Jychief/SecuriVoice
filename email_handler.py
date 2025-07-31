@@ -8,7 +8,7 @@ import traceback
 from speech_to_text import transcribe_audio
 from text_analysis import analyze_voicemail_text
 from audio_analysis import analyze_voicemail_audio
-from email_response import send_analysis_report
+from email_response import send_analysis_report, extract_tracking_code
 from datetime import datetime
 import logging
 import sqlite3
@@ -35,7 +35,7 @@ logging.getLogger('audio_analysis').setLevel(logging.WARNING)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 
 def update_database_schema():
-    """Update database schema to include community permission tracking"""
+    """Update database schema to include tracking code and community permission tracking"""
     try:
         db_path = "voicemail_analysis.db"
         with sqlite3.connect(db_path) as conn:
@@ -45,8 +45,9 @@ def update_database_schema():
             cursor.execute("PRAGMA table_info(voicemail_submissions)")
             existing_columns = {row[1] for row in cursor.fetchall()}
             
-            # Add new columns for community sharing
+            # Add new columns for tracking and community sharing
             new_columns = [
+                ("tracking_code", "TEXT DEFAULT NULL"),
                 ("community_permission", "BOOLEAN DEFAULT FALSE"),
                 ("permission_granted_at", "TIMESTAMP DEFAULT NULL"),
                 ("permission_email_uid", "TEXT DEFAULT NULL"),
@@ -67,22 +68,56 @@ def update_database_schema():
             conn.commit()
             
             if columns_added > 0:
-                print(f"✅ Added {columns_added} new columns for community permissions")
+                print(f"✅ Added {columns_added} new columns for tracking and community permissions")
                 
     except Exception as e:
         print(f"❌ Failed to update database schema: {e}")
         raise
 
-def is_reply_to_securivoice(msg, sender_email: str) -> bool:
+def save_tracking_code_to_db(db_id: int, tracking_code: str) -> bool:
     """
-    Check if an email is a reply to a SecuriVoice analysis report
+    Save tracking code to database for the specific submission
+    
+    Args:
+        db_id: Database ID of the submission
+        tracking_code: Generated tracking code
+        
+    Returns:
+        True if saved successfully
+    """
+    try:
+        db_path = "voicemail_analysis.db"
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE voicemail_submissions 
+                SET tracking_code = ?
+                WHERE id = ?
+            ''', (tracking_code, db_id))
+            
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                print(f"✅ Tracking code {tracking_code} saved for submission ID: {db_id}")
+                return True
+            else:
+                print(f"❌ No submission found with ID: {db_id}")
+                return False
+                
+    except Exception as e:
+        print(f"❌ Error saving tracking code: {e}")
+        return False
+
+def is_reply_to_securivoice(msg, sender_email: str) -> tuple:
+    """
+    Check if an email is a reply to a SecuriVoice analysis report and extract tracking code
     
     Args:
         msg: Email message object
         sender_email: Email address of the sender
         
     Returns:
-        True if this is a reply to SecuriVoice
+        Tuple of (is_reply_boolean, tracking_code_or_none)
     """
     try:
         # Get and decode the subject line properly
@@ -102,7 +137,7 @@ def is_reply_to_securivoice(msg, sender_email: str) -> bool:
                         part = part.decode('utf-8', errors='ignore')
                 subject_parts.append(part)
             
-            subject = ''.join(subject_parts).lower()
+            subject = ''.join(subject_parts)
         else:
             subject = ''
         
@@ -110,66 +145,110 @@ def is_reply_to_securivoice(msg, sender_email: str) -> bool:
         print(f"   Raw subject: {raw_subject}")
         print(f"   Decoded subject: {subject}")
         
-        if not subject.startswith('re:'):
+        if not subject.lower().startswith('re:'):
             print(f"❌ Not a reply - no 'Re:' prefix")
-            return False
+            return False, None
             
-        if 'securivoice' not in subject:
+        if 'securivoice' not in subject.lower():
             print(f"❌ Not a SecuriVoice reply - no 'securivoice' in subject")
-            return False
+            return False, None
         
         print(f"✅ Subject indicates SecuriVoice reply")
         
-        # Check if we have this sender in our database
-        db_path = "voicemail_analysis.db"
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            
-            # First, check all submissions from this sender
-            cursor.execute('''
-                SELECT id, phone_number, community_permission, submission_date 
-                FROM voicemail_submissions 
-                WHERE sender_email = ?
-                ORDER BY submission_date DESC
-            ''', (sender_email,))
-            
-            all_results = cursor.fetchall()
-            print(f"🔍 Found {len(all_results)} total submissions from {sender_email}")
-            
-            for row in all_results:
-                print(f"   ID: {row[0]}, Phone: {row[1]}, Permission: {row[2]}, Date: {row[3]}")
-            
-            # Now check for submissions without permission
-            cursor.execute('''
-                SELECT id FROM voicemail_submissions 
-                WHERE sender_email = ? AND community_permission = FALSE
-            ''', (sender_email,))
-            
-            pending_results = cursor.fetchall()
-            print(f"🔍 Found {len(pending_results)} submissions without permission from {sender_email}")
-            
-            has_pending = len(pending_results) > 0
-            print(f"🔍 Reply check result: {has_pending}")
-            return has_pending
+        # Extract tracking code from subject
+        tracking_code = extract_tracking_code(subject)
+        
+        if not tracking_code:
+            print(f"❌ No tracking code found in subject")
+            return False, None
+        
+        print(f"✅ Found tracking code: {tracking_code}")
+        
+        # Verify this tracking code exists in our database and matches the sender
+        if verify_tracking_code_ownership(tracking_code, sender_email):
+            print(f"✅ Tracking code verified for sender {sender_email}")
+            return True, tracking_code
+        else:
+            print(f"❌ Tracking code {tracking_code} not found or doesn't belong to {sender_email}")
+            return False, None
             
     except Exception as e:
         print(f"❌ Error checking if reply to SecuriVoice: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        return False, None
 
-def find_original_submission(sender_email: str) -> int:
+def verify_tracking_code_ownership(tracking_code: str, sender_email: str) -> bool:
     """
-    Find the most recent submission from this sender that doesn't have permission yet
+    Verify that the tracking code belongs to a submission from the given sender email
+    and that permission hasn't already been granted
     
     Args:
+        tracking_code: Tracking code to verify
+        sender_email: Email address of the sender
+        
+    Returns:
+        True if tracking code is valid and belongs to sender
+    """
+    try:
+        db_path = "voicemail_analysis.db"
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Find submission with this tracking code and sender email
+            cursor.execute('''
+                SELECT id, phone_number, transcript, community_permission, submission_date 
+                FROM voicemail_submissions 
+                WHERE tracking_code = ? AND sender_email = ? AND community_permission = FALSE
+            ''', (tracking_code, sender_email))
+            
+            result = cursor.fetchone()
+            
+            if result:
+                print(f"✅ Found matching submission:")
+                print(f"   ID: {result[0]}")
+                print(f"   Phone: {result[1]}")
+                print(f"   Transcript: {result[2][:50]}...")
+                print(f"   Permission: {result[3]}")
+                print(f"   Date: {result[4]}")
+                return True
+            else:
+                print(f"❌ No matching submission found or permission already granted")
+                
+                # Check if tracking code exists at all
+                cursor.execute('''
+                    SELECT id, sender_email, community_permission 
+                    FROM voicemail_submissions 
+                    WHERE tracking_code = ?
+                ''', (tracking_code,))
+                
+                check_result = cursor.fetchone()
+                if check_result:
+                    print(f"📋 Tracking code exists but:")
+                    print(f"   Sender email: {check_result[1]} (expected: {sender_email})")
+                    print(f"   Permission already granted: {check_result[2]}")
+                else:
+                    print(f"📋 Tracking code {tracking_code} not found in database")
+                
+                return False
+            
+    except Exception as e:
+        print(f"❌ Error verifying tracking code: {e}")
+        return False
+
+def find_submission_by_tracking_code(tracking_code: str, sender_email: str) -> int:
+    """
+    Find the submission ID by tracking code and sender email
+    
+    Args:
+        tracking_code: Tracking code from the email
         sender_email: Email address of the sender
         
     Returns:
         Database ID of the submission, or None if not found
     """
     try:
-        print(f"🔍 Looking for original submission from: {sender_email}")
+        print(f"🔍 Looking for submission with tracking code: {tracking_code}")
         
         db_path = "voicemail_analysis.db"
         with sqlite3.connect(db_path) as conn:
@@ -177,14 +256,12 @@ def find_original_submission(sender_email: str) -> int:
             cursor.execute('''
                 SELECT id, phone_number, transcript, community_permission, submission_date 
                 FROM voicemail_submissions 
-                WHERE sender_email = ? AND community_permission = FALSE
-                ORDER BY submission_date DESC
-                LIMIT 1
-            ''', (sender_email,))
+                WHERE tracking_code = ? AND sender_email = ? AND community_permission = FALSE
+            ''', (tracking_code, sender_email))
             
             result = cursor.fetchone()
             if result:
-                print(f"✅ Found original submission:")
+                print(f"✅ Found submission with tracking code:")
                 print(f"   ID: {result[0]}")
                 print(f"   Phone: {result[1]}")
                 print(f"   Transcript: {result[2][:50]}...")
@@ -192,37 +269,21 @@ def find_original_submission(sender_email: str) -> int:
                 print(f"   Date: {result[4]}")
                 return result[0]
             else:
-                print(f"❌ No submission without permission found for {sender_email}")
-                
-                # Check if there are ANY submissions from this email
-                cursor.execute('''
-                    SELECT id, community_permission, submission_date 
-                    FROM voicemail_submissions 
-                    WHERE sender_email = ?
-                    ORDER BY submission_date DESC
-                ''', (sender_email,))
-                
-                any_results = cursor.fetchall()
-                if any_results:
-                    print(f"📋 But found {len(any_results)} total submissions from this email:")
-                    for row in any_results:
-                        print(f"   ID: {row[0]}, Permission: {row[1]}, Date: {row[2]}")
-                else:
-                    print(f"📋 No submissions found at all from {sender_email}")
-                
+                print(f"❌ No submission found with tracking code {tracking_code} for {sender_email}")
                 return None
             
     except Exception as e:
-        print(f"❌ Error finding original submission: {e}")
+        print(f"❌ Error finding submission by tracking code: {e}")
         return None
 
-def grant_community_permission(submission_id: int, email_uid: str) -> bool:
+def grant_community_permission(submission_id: int, email_uid: str, tracking_code: str) -> bool:
     """
-    Grant community permission for a submission
+    Grant community permission for a specific submission
     
     Args:
         submission_id: Database ID of the submission
         email_uid: UID of the permission email
+        tracking_code: Tracking code for verification
         
     Returns:
         True if permission granted successfully
@@ -236,16 +297,16 @@ def grant_community_permission(submission_id: int, email_uid: str) -> bool:
                 SET community_permission = TRUE,
                     permission_granted_at = ?,
                     permission_email_uid = ?
-                WHERE id = ?
-            ''', (datetime.now(), email_uid, submission_id))
+                WHERE id = ? AND tracking_code = ?
+            ''', (datetime.now(), email_uid, submission_id, tracking_code))
             
             conn.commit()
             
             if cursor.rowcount > 0:
-                print(f"✅ Community permission granted for submission ID: {submission_id}")
+                print(f"✅ Community permission granted for submission ID: {submission_id} (tracking: {tracking_code})")
                 return True
             else:
-                print(f"❌ No submission found with ID: {submission_id}")
+                print(f"❌ No submission found with ID: {submission_id} and tracking code: {tracking_code}")
                 return False
                 
     except Exception as e:
@@ -268,7 +329,7 @@ def get_submission_details(submission_id: int) -> dict:
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT phone_number, transcript, text_risk_score, 
-                       overall_risk_score, submission_date
+                       overall_risk_score, submission_date, tracking_code
                 FROM voicemail_submissions 
                 WHERE id = ?
             ''', (submission_id,))
@@ -280,7 +341,8 @@ def get_submission_details(submission_id: int) -> dict:
                     'transcript': result[1],
                     'text_risk_score': result[2],
                     'overall_risk_score': result[3],
-                    'submission_date': result[4]
+                    'submission_date': result[4],
+                    'tracking_code': result[5]
                 }
             return None
             
@@ -315,7 +377,10 @@ def send_permission_confirmation(recipient_email: str, submission_details: dict)
         msg = MIMEMultipart('alternative')
         msg['From'] = f"{FROM_NAME} <{FROM_EMAIL}>"
         msg['To'] = recipient_email
-        msg['Subject'] = "✅ SecuriVoice - Community Sharing Permission Confirmed"
+        
+        # Include tracking code in subject
+        tracking_code = submission_details.get('tracking_code', 'Unknown')
+        msg['Subject'] = f"✅ SecuriVoice - Community Sharing Permission Confirmed [{tracking_code}]"
         
         # Get submission info
         phone_number = submission_details.get('phone_number', 'Unknown')
@@ -333,6 +398,7 @@ def send_permission_confirmation(recipient_email: str, submission_details: dict)
                 .content {{ padding: 20px; background-color: #f8f9fa; border-radius: 8px; margin: 20px 0; }}
                 .success-box {{ background-color: #d4edda; color: #155724; padding: 15px; border-radius: 8px; border: 1px solid #c3e6cb; margin: 15px 0; }}
                 .info-box {{ background-color: #e7f3ff; padding: 15px; border-radius: 8px; margin: 15px 0; }}
+                .tracking-code {{ background-color: #2c3e50; color: white; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 1.1em; text-align: center; margin: 10px 0; }}
                 .footer {{ text-align: center; padding: 20px; color: #666; font-size: 12px; }}
             </style>
         </head>
@@ -340,16 +406,18 @@ def send_permission_confirmation(recipient_email: str, submission_details: dict)
             <div class="header">
                 <h1>✅ Community Sharing Confirmed</h1>
                 <p>Thank you for helping protect others!</p>
+                <div class="tracking-code">Submission: {tracking_code}</div>
             </div>
             
             <div class="content">
                 <div class="success-box">
                     <h3>🤝 Permission Granted Successfully</h3>
-                    <p>Your voicemail submission will now be shared anonymously with the SecuriVoice community to help others identify and avoid similar scam attempts.</p>
+                    <p>Your specific voicemail submission ({tracking_code}) will now be shared anonymously with the SecuriVoice community to help others identify and avoid similar scam attempts.</p>
                 </div>
                 
                 <div class="info-box">
                     <h4>📋 Submission Details</h4>
+                    <p><strong>Submission ID:</strong> {tracking_code}</p>
                     <p><strong>Phone Number:</strong> {phone_number}</p>
                     <p><strong>Risk Score:</strong> {risk_score}/10</p>
                     <p><strong>Original Submission:</strong> {submission_date}</p>
@@ -358,13 +426,14 @@ def send_permission_confirmation(recipient_email: str, submission_details: dict)
                 
                 <div class="info-box">
                     <h4>🔒 Privacy Protection</h4>
-                    <p>Your submission will appear on the community page with:</p>
+                    <p>Only this specific submission will appear on the community page with:</p>
                     <ul>
                         <li>✅ The voicemail transcript and analysis</li>
                         <li>✅ The caller's phone number</li>
                         <li>✅ Risk assessment and indicators</li>
                         <li>❌ <strong>NO personal information about you</strong></li>
                     </ul>
+                    <p><em>Other submissions you may have require separate permission.</em></p>
                 </div>
                 
                 <p>View community submissions at: <strong>https://your-domain.com/community</strong></p>
@@ -376,6 +445,7 @@ def send_permission_confirmation(recipient_email: str, submission_details: dict)
             
             <div class="footer">
                 <p>SecuriVoice - Protecting communities from voice-based phishing attacks</p>
+                <p>This confirmation is for submission {tracking_code} only.</p>
                 <p>This is an automated confirmation email.</p>
             </div>
         </body>
@@ -385,19 +455,23 @@ def send_permission_confirmation(recipient_email: str, submission_details: dict)
         # Create plain text version
         text_content = f"""
 SecuriVoice - Community Sharing Permission Confirmed
+Submission: {tracking_code}
 
 Thank you for helping protect others!
 
-Your voicemail submission will now be shared anonymously with the SecuriVoice community.
+Your specific voicemail submission ({tracking_code}) will now be shared anonymously with the SecuriVoice community.
 
 Submission Details:
+- Submission ID: {tracking_code}
 - Phone Number: {phone_number}
 - Risk Score: {risk_score}/10
 - Original Submission: {submission_date}
 - Permission Granted: {datetime.now().strftime("%B %d, %Y at %I:%M %p")}
 
 Privacy Protection:
-Your submission will include the voicemail content, phone number, and analysis results, but NO personal information about you will be shared.
+Only this specific submission will include the voicemail content, phone number, and analysis results, but NO personal information about you will be shared.
+
+Other submissions you may have require separate permission.
 
 View community submissions: https://your-domain.com/community
 
@@ -419,32 +493,33 @@ SecuriVoice Team
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
         
-        print(f"✅ Permission confirmation sent to {recipient_email}")
+        print(f"✅ Permission confirmation sent to {recipient_email} for {tracking_code}")
         return True
         
     except Exception as e:
         print(f"❌ Failed to send permission confirmation: {e}")
         return False
 
-def process_permission_reply(uid, mail, sender_email: str):
-    """Process a reply email granting community permission"""
+def process_permission_reply(uid, mail, sender_email: str, tracking_code: str):
+    """Process a reply email granting community permission for specific submission"""
     print(f"🤝 Processing permission reply from: {sender_email}")
+    print(f"🔍 For tracking code: {tracking_code}")
     
     try:
-        # Find the original submission
-        print(f"🔍 Step 1: Finding original submission...")
-        submission_id = find_original_submission(sender_email)
+        # Find the specific submission by tracking code
+        print(f"🔍 Step 1: Finding submission by tracking code...")
+        submission_id = find_submission_by_tracking_code(tracking_code, sender_email)
         
         if not submission_id:
-            print(f"❌ No pending submission found for {sender_email}")
-            print(f"📧 This might be a duplicate reply or submission already has permission")
+            print(f"❌ No pending submission found for tracking code {tracking_code}")
+            print(f"📧 This submission may already have permission or the tracking code is invalid")
             return
         
         print(f"✅ Found submission ID: {submission_id}")
         
-        # Grant permission
+        # Grant permission for this specific submission
         print(f"🔍 Step 2: Granting permission...")
-        if grant_community_permission(submission_id, uid.decode()):
+        if grant_community_permission(submission_id, uid.decode(), tracking_code):
             print(f"✅ Permission granted successfully")
             
             # Get submission details for confirmation
@@ -460,7 +535,7 @@ def process_permission_reply(uid, mail, sender_email: str):
                 
                 if confirmation_sent:
                     print(f"✅ Confirmation email sent successfully")
-                    print(f"🤝 Community permission granted for submission {submission_id}")
+                    print(f"🤝 Community permission granted for submission {submission_id} (tracking: {tracking_code})")
                 else:
                     print(f"❌ Failed to send confirmation email")
             else:
@@ -505,9 +580,11 @@ def process_email(uid, mail):
         print(f"   Subject: {subject}")
 
         # Check if this is a reply to SecuriVoice (permission grant)
-        if is_reply_to_securivoice(msg, clean_sender_email):
-            print("🤝 Detected permission reply!")
-            process_permission_reply(uid, mail, clean_sender_email)
+        is_reply, tracking_code = is_reply_to_securivoice(msg, clean_sender_email)
+        
+        if is_reply and tracking_code:
+            print(f"🤝 Detected permission reply for tracking code: {tracking_code}")
+            process_permission_reply(uid, mail, clean_sender_email, tracking_code)
             return
         else:
             print("📧 Not a permission reply, processing as new voicemail submission")
@@ -575,7 +652,7 @@ def process_email(uid, mail):
                     overall_risk_score = text_analysis.risk_score
                     audio_analysis = None
                 
-                # Send analysis report email back to sender (with community sharing info)
+                # Send analysis report email back to sender (with tracking code)
                 try:
                     print(f"📤 Sending report...")
                     
@@ -595,11 +672,15 @@ def process_email(uid, mail):
                         'has_audio_analysis': audio_analysis is not None
                     }
                     
-                    # Send the analysis report email
-                    email_sent = send_analysis_report(clean_sender_email, voicemail_data)
+                    # Send the analysis report email and get tracking code
+                    email_sent, tracking_code = send_analysis_report(clean_sender_email, voicemail_data, db_id)
                     
-                    if email_sent:
+                    if email_sent and tracking_code:
                         print(f"✅ Report sent to {clean_sender_email}")
+                        print(f"🔍 Tracking code: {tracking_code}")
+                        
+                        # Save tracking code to database
+                        save_tracking_code_to_db(db_id, tracking_code)
                     else:
                         print(f"❌ Failed to send report")
                         
@@ -627,7 +708,7 @@ def polling_loop():
     """Main polling loop - checks for new emails every 15 seconds"""
     print("🚀 Starting email monitoring...")
     
-    # Update database schema for community permissions
+    # Update database schema for tracking and community permissions
     update_database_schema()
     
     last_email_count = 0

@@ -5,6 +5,8 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from dotenv import load_dotenv
 import traceback
+import hashlib
+import uuid
 
 load_dotenv()
 
@@ -15,6 +17,40 @@ SMTP_USER = os.getenv('SMTP_USER')  # Your sending email
 SMTP_PASS = os.getenv('SMTP_PASS')  # Your app password
 FROM_EMAIL = os.getenv('FROM_EMAIL', SMTP_USER)
 FROM_NAME = os.getenv('FROM_NAME', 'SecuriVoice Analysis System')
+
+def generate_tracking_code(db_id: int, sender_email: str) -> str:
+    """
+    Generate a unique tracking code for each submission
+    
+    Args:
+        db_id: Database ID of the submission
+        sender_email: Email address of the sender
+        
+    Returns:
+        Unique tracking code string
+    """
+    # Create a deterministic but unique tracking code
+    source_data = f"{db_id}:{sender_email}:{datetime.now().isoformat()}"
+    hash_object = hashlib.sha256(source_data.encode())
+    tracking_code = hash_object.hexdigest()[:12].upper()  # 12 character code
+    return f"SV-{tracking_code}"
+
+def extract_tracking_code(subject: str) -> str:
+    """
+    Extract tracking code from email subject
+    
+    Args:
+        subject: Email subject line
+        
+    Returns:
+        Tracking code if found, empty string otherwise
+    """
+    import re
+    # Look for pattern like [SV-XXXXXXXXXXXX] in subject
+    match = re.search(r'\[SV-([A-F0-9]{12})\]', subject.upper())
+    if match:
+        return f"SV-{match.group(1)}"
+    return ""
 
 def get_risk_level(risk_score: int) -> tuple:
     """
@@ -33,12 +69,13 @@ def get_risk_level(risk_score: int) -> tuple:
     else:
         return "LOW", "low"
 
-def generate_analysis_report(voicemail_data: dict) -> str:
+def generate_analysis_report(voicemail_data: dict, tracking_code: str) -> str:
     """
-    Generate HTML analysis report template with audio analysis and community sharing info
+    Generate HTML analysis report template with audio analysis, community sharing info, and tracking code
     
     Args:
         voicemail_data: Dictionary containing voicemail information
+        tracking_code: Unique tracking code for this submission
         
     Returns:
         HTML formatted report string
@@ -154,12 +191,14 @@ def generate_analysis_report(voicemail_data: dict) -> str:
             .community-section {{ background-color: #e7f9ff; color: #004085; padding: 20px; border-radius: 8px; margin: 20px 0; border: 2px solid #b3d9ff; }}
             .community-highlight {{ background-color: #cce7ff; padding: 15px; border-radius: 6px; margin: 15px 0; text-align: center; }}
             .reply-instruction {{ background-color: #fff; padding: 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #007bff; }}
+            .tracking-code {{ background-color: #2c3e50; color: white; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 1.1em; text-align: center; margin: 10px 0; }}
         </style>
     </head>
     <body>
         <div class="header">
             <h1>🛡️ SecuriVoice Analysis Report</h1>
             <p>Voicemail Phishing Detection Results</p>
+            <div class="tracking-code">Tracking Code: {tracking_code}</div>
         </div>
         
         <div class="content">
@@ -174,6 +213,7 @@ def generate_analysis_report(voicemail_data: dict) -> str:
                 <p><strong>Caller Phone Number:</strong> {phone_number}</p>
                 <p><strong>File Analyzed:</strong> {file_name}</p>
                 <p><strong>Analysis Date:</strong> {processed_date}</p>
+                <p><strong>Submission ID:</strong> {tracking_code}</p>
             </div>
             
             <div class="section">
@@ -220,7 +260,7 @@ def generate_analysis_report(voicemail_data: dict) -> str:
                 </ul>'''}
             </div>
             
-            <!-- NEW: Community Sharing Section -->
+            <!-- UPDATED: Community Sharing Section with tracking code info -->
             <div class="community-section">
                 <h3>🤝 Help Protect Others - Community Submissions</h3>
                 <p>Your analysis has been completed and is helping protect you from potential scams. You can also help protect others by sharing your submission anonymously with the SecuriVoice community.</p>
@@ -231,13 +271,15 @@ def generate_analysis_report(voicemail_data: dict) -> str:
                 </div>
                 
                 <div class="reply-instruction">
-                    <h4>🔄 How to Share Your Submission</h4>
+                    <h4>🔄 How to Share This Specific Submission</h4>
                     <p><strong>Simply reply to this email with any message to give permission for anonymous sharing.</strong></p>
                     <ul>
+                        <li>✅ Only this specific submission (ID: {tracking_code}) will be shared</li>
                         <li>✅ Your submission will be posted anonymously (no personal information shared)</li>
                         <li>✅ Only the voicemail content, phone number, and analysis results will be shown</li>
                         <li>✅ This helps others learn to identify similar scam attempts</li>
                     </ul>
+                    <p><em>Your reply will only grant permission for this specific analysis. Other submissions require separate permission.</em></p>
                     <p><em>No reply needed if you prefer to keep your submission private.</em></p>
                 </div>
                 
@@ -265,7 +307,7 @@ def generate_analysis_report(voicemail_data: dict) -> str:
         <div class="footer">
             <p>SecuriVoice - Protecting you from voice-based phishing attacks</p>
             <p>Enhanced with AI voice detection technology</p>
-            <p><strong>Reply to this email to share your submission anonymously with the community</strong></p>
+            <p><strong>Reply to this email to share submission {tracking_code} anonymously with the community</strong></p>
             <p>This report was generated automatically.</p>
         </div>
     </body>
@@ -274,21 +316,25 @@ def generate_analysis_report(voicemail_data: dict) -> str:
     
     return html_report
 
-def send_analysis_report(recipient_email: str, voicemail_data: dict) -> bool:
+def send_analysis_report(recipient_email: str, voicemail_data: dict, db_id: int) -> tuple:
     """
-    Send analysis report via email (UPDATED with community sharing info)
+    Send analysis report via email with tracking code for specific submission matching
     
     Args:
         recipient_email: Email address to send report to
         voicemail_data: Dictionary containing voicemail analysis data
+        db_id: Database ID of the submission for tracking
         
     Returns:
-        True if email sent successfully, False otherwise
+        Tuple of (success_boolean, tracking_code)
     """
     
     try:
-        # Generate the report
-        html_report = generate_analysis_report(voicemail_data)
+        # Generate unique tracking code for this submission
+        tracking_code = generate_tracking_code(db_id, recipient_email)
+        
+        # Generate the report with tracking code
+        html_report = generate_analysis_report(voicemail_data, tracking_code)
         
         # Get risk level for subject line (use overall risk if available)
         has_audio_analysis = voicemail_data.get('has_audio_analysis', False)
@@ -300,16 +346,17 @@ def send_analysis_report(recipient_email: str, voicemail_data: dict) -> bool:
         msg['From'] = f"{FROM_NAME} <{FROM_EMAIL}>"
         msg['To'] = recipient_email
         
-        # Enhanced subject line
+        # Enhanced subject line with tracking code
         subject_prefix = "🛡️ SecuriVoice Analysis Report"
         if has_audio_analysis:
             audio_analysis = voicemail_data.get('audio_analysis')
             if audio_analysis and audio_analysis.is_ai_generated:
                 subject_prefix += " [AI VOICE DETECTED]"
         
-        msg['Subject'] = f"{subject_prefix} - {risk_level} Risk Detected"
+        # Include tracking code in subject for easy matching
+        msg['Subject'] = f"{subject_prefix} - {risk_level} Risk Detected [{tracking_code}]"
         
-        # Create enhanced plain text version with community info
+        # Create enhanced plain text version with tracking code
         indicators_text = "\n".join([f"- {indicator}" for indicator in voicemail_data.get('indicators', [])])
         explanation = voicemail_data.get('explanation', 'No explanation available')
         caller_id_mismatch = voicemail_data.get('caller_id_mismatch', False)
@@ -332,6 +379,7 @@ Audio Analysis (VoiceGUARD):
         
         text_content = f"""
 SecuriVoice Analysis Report
+Tracking Code: {tracking_code}
 
 Your voicemail from {voicemail_data.get('phone_number', 'Unknown')} has been analyzed.
 
@@ -359,7 +407,9 @@ Recommendations:
 {'- Be aware that AI voice technology may have been used' if has_audio_analysis and voicemail_data.get('audio_analysis') and voicemail_data.get('audio_analysis').is_ai_generated else ''}
 
 === HELP PROTECT OTHERS ===
-Want to help others avoid similar scams? Simply REPLY to this email with any message to share your submission anonymously with the community. Your personal information will never be shared.
+Want to help others avoid similar scams? Simply REPLY to this email with any message to share submission {tracking_code} anonymously with the community. 
+
+Your personal information will never be shared. Only this specific submission will be granted permission when you reply.
 
 View community submissions: https://your-domain.com/community
 
@@ -379,15 +429,15 @@ This is an automated analysis from SecuriVoice with enhanced AI voice detection.
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
         
-        return True
+        return True, tracking_code
         
     except Exception as e:
         print(f"❌ Failed to send analysis report to {recipient_email}: {e}")
         traceback.print_exc()
-        return False
+        return False, ""
 
 def test_email_system():
-    """Test the email response system with audio analysis"""
+    """Test the email response system with tracking code functionality"""
     
     # Test data with mock audio analysis
     class MockAudioAnalysis:
@@ -414,18 +464,30 @@ def test_email_system():
         'overall_risk_score': 9  # Combined score
     }
     
+    # Test tracking code generation
+    test_db_id = 123
+    test_email = "test@example.com"
+    tracking_code = generate_tracking_code(test_db_id, test_email)
+    print(f"✅ Generated tracking code: {tracking_code}")
+    
+    # Test tracking code extraction
+    test_subject = f"Re: 🛡️ SecuriVoice Analysis Report - HIGH Risk Detected [{tracking_code}]"
+    extracted_code = extract_tracking_code(test_subject)
+    print(f"✅ Extracted tracking code: {extracted_code}")
+    print(f"✅ Codes match: {tracking_code == extracted_code}")
+    
     # Generate report (don't send, just preview)
-    report = generate_analysis_report(test_voicemail_data)
+    report = generate_analysis_report(test_voicemail_data, tracking_code)
     
     # Save to file for preview
-    with open('sample_report_with_community.html', 'w', encoding='utf-8') as f:
+    with open('sample_report_with_tracking.html', 'w', encoding='utf-8') as f:
         f.write(report)
     
-    print("✅ Sample report with community sharing generated: sample_report_with_community.html")
+    print("✅ Sample report with tracking code generated: sample_report_with_tracking.html")
     print("🔍 Open this file in your browser to preview the enhanced report")
     
     # Uncomment to test actual email sending:
-    # return send_analysis_report("your-test-email@example.com", test_voicemail_data)
+    # return send_analysis_report("your-test-email@example.com", test_voicemail_data, test_db_id)
 
 if __name__ == "__main__":
     test_email_system()
